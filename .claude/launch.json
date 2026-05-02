@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cardkave",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "/Users/shivankahuja/Desktop/CardKave", "-p", "8765", "-c-1", "--silent"],
+      "port": 8765
+    }
+  ]
+}

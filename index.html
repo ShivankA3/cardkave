@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CardKave</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://images.pokemontcg.io" crossorigin />
+<link rel="dns-prefetch" href="https://images.pokemontcg.io" />
+<link rel="stylesheet" href="styles.css?v=26" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/browse" aria-label="CardKave home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">CardKave</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <a href="#/feed" data-route="feed">Feed</a>
+      <a href="#/groups" data-route="groups">Groups</a>
+      <a href="#/events" data-route="events">Events</a>
+      <a href="#/browse" data-route="browse">Browse</a>
+      <a href="#/collection" data-route="collection">Collection <span class="count" id="count-collection">0</span></a>
+      <a href="#/wishlist" data-route="wishlist">Wishlist <span class="count" id="count-wishlist">0</span></a>
+      <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
+      <a href="#/decks" data-route="decks">Decks <span class="count" id="count-decks">0</span></a>
+    </nav>
+    <a class="nav-profile" id="nav-profile" href="#/profile" data-route="profile">Sign in</a>
+  </header>
+
+  <main id="view" class="view" aria-live="polite"></main>
+
+  <footer class="foot">
+    <span>CardKave &middot; card data from pokemontcg.io &middot; Pokémon data from PokéAPI</span>
+    <span id="last-updated" class="muted"></span>
+  </footer>
+
+  <template id="tpl-browse">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Browse</h1>
+        <div class="tabs" role="tablist" id="browse-tabs">
+          <button class="tab active" data-tab="sets" type="button">Sets</button>
+          <button class="tab" data-tab="cards" type="button">Cards</button>
+        </div>
+      </div>
+
+      <div id="browse-sets-panel" class="browse-panel stack">
+        <input id="search" class="input" type="search" placeholder="Search sets" autocomplete="off" />
+        <div id="grid" class="set-grid"></div>
+        <div id="loader" class="muted center hidden">Loading…</div>
+      </div>
+
+      <div id="browse-cards-panel" class="browse-panel stack hidden">
+        <input id="card-search" class="input card-search-input" type="search" placeholder="Search cards by name (e.g. Charizard ex)" autocomplete="off" />
+        <section id="recent-section" class="recent-section hidden">
+          <div class="row">
+            <h2 class="h2">Recently searched</h2>
+            <button type="button" id="clear-recent" class="link-btn">Clear</button>
+          </div>
+          <div id="recent-grid" class="tcg-grid"></div>
+        </section>
+        <div id="card-search-status" class="muted center">Type a card name above to search across every set.</div>
+        <div id="card-search-grid" class="tcg-grid"></div>
+      </div>
+    </section>
+  </template>
+
+  <template id="tpl-set">
+    <section class="stack">
+      <a class="back" href="#/browse">&larr; All sets</a>
+      <div class="set-header">
+        <div id="set-logo" class="set-logo"></div>
+        <div class="set-info">
+          <h1 id="set-name" class="h1"></h1>
+          <p id="set-meta" class="muted mono"></p>
+        </div>
+      </div>
+      <div id="set-status" class="muted">Loading cards…</div>
+      <div id="set-cards" class="tcg-grid"></div>
+    </section>
+  </template>
+
+  <template id="tpl-detail">
+    <section class="stack">
+      <a class="back" href="#/browse">&larr; Back</a>
+      <div class="detail">
+        <div class="detail-art">
+          <img id="art" alt="" />
+        </div>
+        <div class="detail-info">
+          <div class="muted mono" id="num"></div>
+          <h1 id="name" class="h1"></h1>
+          <div id="types" class="types"></div>
+          <dl class="meta">
+            <div><dt>Height</dt><dd id="height"></dd></div>
+            <div><dt>Weight</dt><dd id="weight"></dd></div>
+            <div><dt>Abilities</dt><dd id="abilities"></dd></div>
+          </dl>
+          <ul id="stats" class="stats"></ul>
+        </div>
+      </div>
+
+      <section class="cards-section">
+        <div class="row">
+          <h2 class="h2">Cards</h2>
+          <span id="cards-meta" class="muted"></span>
+        </div>
+        <div id="cards-status" class="muted">Loading cards…</div>
+        <div id="cards-grid" class="tcg-grid"></div>
+      </section>
+    </section>
+  </template>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Card details">
+    <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+    <div class="modal-inner">
+      <img id="modal-img" alt="" />
+      <div class="modal-info">
+        <h3 id="modal-name" class="h2"></h3>
+        <div class="modal-actions">
+          <div class="qty-control" id="modal-collect-ctrl">
+            <span class="qty-label">Collection</span>
+            <div class="qty-stepper">
+              <button class="qty-btn" id="modal-collect-minus" type="button" aria-label="Remove one from collection">−</button>
+              <span class="qty-val" id="modal-collect-qty">0</span>
+              <button class="qty-btn" id="modal-collect-plus" type="button" aria-label="Add one to collection">+</button>
+            </div>
+          </div>
+          <div class="qty-control" id="modal-wish-ctrl">
+            <span class="qty-label">Wishlist</span>
+            <div class="qty-stepper">
+              <button class="qty-btn" id="modal-wish-minus" type="button" aria-label="Remove one from wishlist">−</button>
+              <span class="qty-val" id="modal-wish-qty">0</span>
+              <button class="qty-btn" id="modal-wish-plus" type="button" aria-label="Add one to wishlist">+</button>
+            </div>
+          </div>
+        </div>
+        <dl class="meta">
+          <div><dt>Set</dt><dd id="modal-set"></dd></div>
+          <div><dt>Released</dt><dd id="modal-date"></dd></div>
+          <div><dt>Rarity</dt><dd id="modal-rarity"></dd></div>
+          <div><dt>Number</dt><dd id="modal-num"></dd></div>
+          <div><dt>Artist</dt><dd id="modal-artist"></dd></div>
+          <div><dt>HP</dt><dd id="modal-hp"></dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <template id="tpl-list">
+    <section class="stack">
+      <h1 class="h1" id="list-title"></h1>
+      <p class="muted" id="list-empty">Nothing saved yet.</p>
+      <div id="list-grid" class="grid"></div>
+    </section>
+  </template>
+
+  <template id="tpl-profile">
+    <section class="stack profile-stack">
+      <h1 class="h1" id="profile-title">Set up your profile</h1>
+      <p class="muted">Used to credit your posts and filter your community feed. Stays in this browser.</p>
+      <form id="profile-form" class="profile-form">
+        <label class="field">
+          <span class="field-label">Display name</span>
+          <input id="pf-name" class="input" required maxlength="40" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">City or area</span>
+          <input id="pf-loc" class="input" placeholder="e.g. Brooklyn, NY" required maxlength="60" autocomplete="off" />
+        </label>
+        <label class="check">
+          <input id="pf-paid" type="checkbox" />
+          <span><strong>Premium member</strong> <span class="muted">— required to create groups (toggle for demo)</span></span>
+        </label>
+        <div class="actions">
+          <button class="btn" type="submit">Save</button>
+          <a class="btn ghost" href="#/feed">Cancel</a>
+        </div>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-feed">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Feed</h1>
+        <div class="tabs" role="tablist" id="feed-tabs">
+          <button class="tab" data-tab="community" type="button">Community</button>
+          <button class="tab active" data-tab="all" type="button">All</button>
+        </div>
+      </div>
+      <p class="muted" id="feed-context"></p>
+      <div id="compose-host"></div>
+      <div id="feed-list" class="feed-list"></div>
+      <p id="feed-empty" class="muted center hidden">No posts yet.</p>
+    </section>
+  </template>
+
+  <template id="tpl-compose">
+    <form class="compose" id="compose">
+      <div class="compose-head">
+        <span class="avatar" id="compose-avatar"></span>
+        <span class="muted mono" id="compose-meta"></span>
+      </div>
+      <textarea id="compose-text" class="input compose-text" placeholder="Share a pull, a question, or a trade…" maxlength="500" required></textarea>
+      <div id="compose-card" class="compose-card hidden">
+        <img id="compose-card-img" alt="" />
+        <span id="compose-card-name"></span>
+        <button type="button" id="compose-card-clear" class="icon-btn" aria-label="Remove card">&times;</button>
+      </div>
+      <div class="compose-row">
+        <select id="compose-attach" class="input compose-select">
+          <option value="">+ Attach a card</option>
+        </select>
+        <select id="compose-target" class="input compose-select">
+          <option value="">Public</option>
+        </select>
+        <button type="submit" class="btn">Post</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="tpl-groups">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Groups</h1>
+        <button id="new-group-btn" class="btn" type="button">+ New group</button>
+      </div>
+      <p class="muted" id="groups-context">Discover collectors near you.</p>
+      <div id="new-group-host"></div>
+      <div id="groups-list" class="groups-list"></div>
+      <p id="groups-empty" class="muted center hidden">No groups yet.</p>
+    </section>
+  </template>
+
+  <template id="tpl-new-group">
+    <form id="new-group-form" class="new-group-form">
+      <h3 class="h2">Create a group</h3>
+      <p class="muted">Premium members only. Other collectors can join after you publish.</p>
+      <label class="field"><span class="field-label">Name</span><input id="ng-name" class="input" required maxlength="60" /></label>
+      <label class="field"><span class="field-label">Location</span><input id="ng-loc" class="input" placeholder="e.g. Brooklyn, NY or Global" required maxlength="60" /></label>
+      <label class="field"><span class="field-label">Description</span><textarea id="ng-desc" class="input" required maxlength="240"></textarea></label>
+      <div class="actions">
+        <button class="btn" type="submit">Create</button>
+        <button class="btn ghost" type="button" id="ng-cancel">Cancel</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="tpl-group">
+    <section class="stack">
+      <a class="back" href="#/groups">&larr; All groups</a>
+      <div class="row">
+        <div>
+          <h1 class="h1" id="group-name"></h1>
+          <p class="muted mono" id="group-meta"></p>
+        </div>
+        <button id="group-join" class="btn" type="button">Join</button>
+      </div>
+      <p id="group-desc"></p>
+      <div id="compose-host"></div>
+      <div id="feed-list" class="feed-list"></div>
+      <p id="feed-empty" class="muted center hidden">No posts in this group yet.</p>
+    </section>
+  </template>
+
+  <template id="tpl-events">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Events</h1>
+        <button id="new-event-btn" class="btn" type="button">+ New event</button>
+      </div>
+      <p class="muted" id="events-context">Meetups, trade nights, and tournaments.</p>
+      <div class="tabs" role="tablist" id="events-tabs">
+        <button class="tab active" data-tab="verified" type="button">Verified</button>
+        <button class="tab" data-tab="pending" type="button">Pending</button>
+      </div>
+      <div id="new-event-host"></div>
+      <div id="events-list" class="events-list"></div>
+      <p id="events-empty" class="muted center hidden">No events yet.</p>
+    </section>
+  </template>
+
+  <template id="tpl-new-event">
+    <form id="new-event-form" class="new-event-form">
+      <h3 class="h2">Create an event</h3>
+      <p class="muted" id="ne-verify-note">New events need to be verified by a moderator before they go live. Reusing a previously verified title and location will publish instantly.</p>
+      <label class="field"><span class="field-label">Title</span><input id="ne-title" class="input" required maxlength="80" /></label>
+      <label class="field"><span class="field-label">Location</span><input id="ne-loc" class="input" placeholder="e.g. Brooklyn, NY" required maxlength="80" /></label>
+      <label class="field"><span class="field-label">Max people</span><input id="ne-max" class="input" type="number" min="2" max="500" value="20" required /></label>
+      <label class="field"><span class="field-label">Description</span><textarea id="ne-desc" class="input" required maxlength="500"></textarea></label>
+      <label class="field">
+        <span class="field-label">Photos (optional, up to 3)</span>
+        <input id="ne-photos" class="input photo-input" type="file" accept="image/*" multiple />
+      </label>
+      <div id="ne-photo-preview" class="photo-preview"></div>
+      <div class="actions">
+        <button class="btn" type="submit">Submit</button>
+        <button class="btn ghost" type="button" id="ne-cancel">Cancel</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="tpl-event">
+    <section class="stack">
+      <a class="back" href="#/events">&larr; All events</a>
+      <div class="row">
+        <div>
+          <h1 class="h1" id="event-title"></h1>
+          <p class="muted mono" id="event-meta"></p>
+        </div>
+        <div class="event-actions">
+          <span id="event-status" class="event-status"></span>
+          <button id="event-rsvp" class="btn" type="button"></button>
+        </div>
+      </div>
+      <div id="event-photos" class="event-photos"></div>
+      <p id="event-desc" class="event-desc"></p>
+      <div class="event-attendance">
+        <div class="event-attendance-bar"><span id="event-attendance-fill"></span></div>
+        <span id="event-attendance-label" class="muted mono"></span>
+      </div>
+      <div id="event-verify-host"></div>
+    </section>
+  </template>
+
+  <template id="tpl-trades">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Trades</h1>
+      </div>
+      <p class="muted" id="trades-context"></p>
+
+      <section id="active-trades-section" class="trades-section hidden">
+        <div class="row">
+          <h2 class="h2">Your trades</h2>
+          <span class="muted mono" id="active-trades-meta"></span>
+        </div>
+        <div id="active-trades" class="active-trades-list"></div>
+      </section>
+
+      <section id="matches-section" class="trades-section hidden">
+        <div class="row">
+          <h2 class="h2">Potential matches</h2>
+        </div>
+        <p class="muted" id="matches-meta"></p>
+        <div id="matches-list" class="matches-list"></div>
+      </section>
+
+      <p id="trades-empty" class="muted center hidden"></p>
+    </section>
+  </template>
+
+  <template id="tpl-propose-trade">
+    <section class="stack">
+      <a class="back" href="#/trades">&larr; All trades</a>
+      <h1 class="h1" id="propose-title"></h1>
+      <p class="muted mono" id="propose-meta"></p>
+      <form id="propose-form" class="trade-form">
+        <fieldset class="trade-fieldset">
+          <legend>You give</legend>
+          <p class="muted" id="propose-mine-help"></p>
+          <div id="propose-mine" class="trade-card-picker"></div>
+        </fieldset>
+        <fieldset class="trade-fieldset">
+          <legend>They give</legend>
+          <p class="muted" id="propose-theirs-help"></p>
+          <div id="propose-theirs" class="trade-card-picker"></div>
+        </fieldset>
+        <div class="actions">
+          <button class="btn" type="submit">Propose trade</button>
+          <a class="btn ghost" href="#/trades">Cancel</a>
+        </div>
+      </form>
+    </section>
+  </template>
+
+  <template id="tpl-trade">
+    <section class="stack">
+      <a class="back" href="#/trades">&larr; All trades</a>
+      <div class="row">
+        <div>
+          <h1 class="h1" id="trade-title"></h1>
+          <p class="muted mono" id="trade-meta"></p>
+        </div>
+        <span id="trade-status" class="trade-status"></span>
+      </div>
+      <div id="trade-cards" class="trade-cards"></div>
+      <div id="trade-actions" class="trade-actions"></div>
+      <div id="trade-edit-host"></div>
+      <section class="trade-messages-section">
+        <h3 class="h2">Messages</h3>
+        <div id="trade-messages" class="trade-messages"></div>
+        <form id="trade-msg-form" class="trade-msg-form">
+          <input id="trade-msg-input" class="input" placeholder="Type a message…" maxlength="500" required autocomplete="off" />
+          <button class="btn" type="submit">Send</button>
+        </form>
+      </section>
+    </section>
+  </template>
+
+  <template id="tpl-trade-edit">
+    <details class="trade-edit">
+      <summary><strong>Edit trade</strong> <span class="badge-pro">Pro</span></summary>
+      <p class="muted">Premium members can swap which cards are involved — useful when one of the cards has changed condition, sold elsewhere, or you've added something new.</p>
+      <form id="trade-edit-form" class="trade-form">
+        <fieldset class="trade-fieldset">
+          <legend>You give</legend>
+          <div id="edit-mine" class="trade-card-picker"></div>
+        </fieldset>
+        <fieldset class="trade-fieldset">
+          <legend>They give</legend>
+          <div id="edit-theirs" class="trade-card-picker"></div>
+        </fieldset>
+        <div class="actions">
+          <button class="btn" type="submit">Save changes</button>
+          <span class="muted mono">Editing resets the trade to <em>proposed</em>.</span>
+        </div>
+      </form>
+    </details>
+  </template>
+
+  <template id="tpl-decks">
+    <section class="stack">
+      <div class="row">
+        <h1 class="h1">Decks</h1>
+        <button id="new-deck-btn" class="btn" type="button">+ New deck</button>
+      </div>
+      <p class="muted" id="decks-context"></p>
+      <div id="new-deck-host"></div>
+      <div id="decks-list" class="decks-list"></div>
+      <p id="decks-empty" class="muted center hidden">No decks yet — create one to get started.</p>
+    </section>
+  </template>
+
+  <template id="tpl-new-deck">
+    <form id="new-deck-form" class="new-deck-form">
+      <h3 class="h2">Create a deck</h3>
+      <p class="muted" id="nd-note">Build a decklist from cards in your collection or wishlist. Download as PDF anytime.</p>
+      <label class="field"><span class="field-label">Name</span><input id="nd-name" class="input" required maxlength="60" placeholder="e.g. Lost Box, Charizard ex" /></label>
+      <label class="field"><span class="field-label">Description (optional)</span><textarea id="nd-desc" class="input" maxlength="240" placeholder="Strategy, format, win condition…"></textarea></label>
+      <div class="actions">
+        <button class="btn" type="submit">Create</button>
+        <button class="btn ghost" type="button" id="nd-cancel">Cancel</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="tpl-deck">
+    <section class="stack">
+      <a class="back" href="#/decks">&larr; All decks</a>
+      <div class="row">
+        <div>
+          <h1 class="h1" id="deck-name"></h1>
+          <p class="muted mono" id="deck-meta"></p>
+        </div>
+        <div class="deck-actions">
+          <button id="deck-download" class="btn" type="button">Download PDF</button>
+          <button id="deck-delete" class="btn ghost" type="button">Delete</button>
+        </div>
+      </div>
+      <p id="deck-desc" class="deck-desc"></p>
+
+      <section class="deck-section">
+        <div class="row">
+          <h2 class="h2">Cards in deck</h2>
+          <span class="muted mono" id="deck-count"></span>
+        </div>
+        <div id="deck-cards" class="deck-cards-list"></div>
+        <p id="deck-cards-empty" class="muted hidden">No cards yet — add some from your collection or wishlist below.</p>
+      </section>
+
+      <section class="deck-section">
+        <div class="row">
+          <h2 class="h2">Add cards</h2>
+          <span class="muted mono" id="deck-pool-meta"></span>
+        </div>
+        <p id="deck-pool-empty" class="muted hidden"></p>
+        <div id="deck-pool" class="deck-pool"></div>
+      </section>
+    </section>
+  </template>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+  <script src="app.js?v=42" defer></script>
+</body>
+</html>
