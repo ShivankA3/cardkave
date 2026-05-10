@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://images.pokemontcg.io" crossorigin />
 <link rel="dns-prefetch" href="https://images.pokemontcg.io" />
-<link rel="stylesheet" href="styles.css?v=26" />
+<link rel="stylesheet" href="styles.css?v=27" />
 </head>
 <body>
   <header class="topbar">
@@ -25,7 +25,8 @@
       <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
       <a href="#/decks" data-route="decks">Decks <span class="count" id="count-decks">0</span></a>
     </nav>
-    <a class="nav-profile" id="nav-profile" href="#/profile" data-route="profile">Sign in</a>
+    <a class="nav-profile" id="nav-profile" href="#/login" data-route="login">Sign in</a>
+    <button id="nav-signout" class="nav-signout hidden" type="button" aria-label="Sign out" title="Sign out">Sign out</button>
   </header>
 
   <main id="view" class="view" aria-live="polite"></main>
@@ -159,11 +160,15 @@
   <template id="tpl-profile">
     <section class="stack profile-stack">
       <h1 class="h1" id="profile-title">Set up your profile</h1>
-      <p class="muted">Used to credit your posts and filter your community feed. Stays in this browser.</p>
+      <p class="muted" id="profile-meta">Used to credit your posts and filter your community feed. Stays in this browser.</p>
       <form id="profile-form" class="profile-form">
         <label class="field">
           <span class="field-label">Display name</span>
           <input id="pf-name" class="input" required maxlength="40" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">Email</span>
+          <input id="pf-email" class="input" type="email" disabled />
         </label>
         <label class="field">
           <span class="field-label">City or area</span>
@@ -176,9 +181,215 @@
         <div class="actions">
           <button class="btn" type="submit">Save</button>
           <a class="btn ghost" href="#/feed">Cancel</a>
+          <button class="btn ghost" type="button" id="profile-signout">Sign out</button>
         </div>
       </form>
     </section>
+  </template>
+
+  <template id="tpl-login">
+    <section class="auth-page">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">CardKave</span>
+        </div>
+        <h1 class="auth-title">Welcome back</h1>
+        <p class="auth-sub">Sign in to track your collection, trades, and decks.</p>
+
+        <div class="auth-providers">
+          <button type="button" class="btn-provider btn-google" id="login-google">
+            <svg class="provider-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+            </svg>
+            <span>Continue with Google</span>
+          </button>
+          <button type="button" class="btn-provider btn-apple" id="login-apple">
+            <svg class="provider-icon" viewBox="0 0 16 18" aria-hidden="true">
+              <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
+            </svg>
+            <span>Continue with Apple</span>
+          </button>
+        </div>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <form id="login-form" class="auth-form" novalidate>
+          <label class="field">
+            <span class="field-label">Email</span>
+            <input id="login-email" class="input" type="email" required autocomplete="email" placeholder="you@example.com" />
+          </label>
+          <label class="field">
+            <span class="field-label">
+              Password
+              <button type="button" id="login-show-pw" class="link-btn auth-show-pw">Show</button>
+            </span>
+            <input id="login-password" class="input" type="password" required autocomplete="current-password" minlength="6" placeholder="Your password" />
+          </label>
+          <p id="login-error" class="auth-error hidden" role="alert"></p>
+          <button class="btn auth-submit" type="submit" id="login-submit">Sign in</button>
+        </form>
+
+        <p class="auth-foot">New to CardKave? <a class="link" href="#/signup">Create an account</a></p>
+      </div>
+    </section>
+  </template>
+
+  <template id="tpl-signup">
+    <section class="auth-page">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">CardKave</span>
+        </div>
+        <h1 class="auth-title">Create your account</h1>
+        <p class="auth-sub">Join collectors, swap cards, build decks.</p>
+
+        <div class="auth-providers">
+          <button type="button" class="btn-provider btn-google" id="signup-google">
+            <svg class="provider-icon" viewBox="0 0 18 18" aria-hidden="true">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+            </svg>
+            <span>Sign up with Google</span>
+          </button>
+          <button type="button" class="btn-provider btn-apple" id="signup-apple">
+            <svg class="provider-icon" viewBox="0 0 16 18" aria-hidden="true">
+              <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
+            </svg>
+            <span>Sign up with Apple</span>
+          </button>
+        </div>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <form id="signup-form" class="auth-form" novalidate>
+          <label class="field">
+            <span class="field-label">Display name</span>
+            <input id="signup-name" class="input" required maxlength="40" autocomplete="name" placeholder="How you'll appear to others" />
+          </label>
+          <label class="field">
+            <span class="field-label">Email</span>
+            <input id="signup-email" class="input" type="email" required autocomplete="email" placeholder="you@example.com" />
+          </label>
+          <label class="field">
+            <span class="field-label">City or area</span>
+            <input id="signup-location" class="input" required maxlength="60" autocomplete="address-level2" placeholder="e.g. Brooklyn, NY" />
+          </label>
+          <label class="field">
+            <span class="field-label">
+              Password
+              <button type="button" id="signup-show-pw" class="link-btn auth-show-pw">Show</button>
+            </span>
+            <input id="signup-password" class="input" type="password" required minlength="6" autocomplete="new-password" placeholder="At least 6 characters" />
+          </label>
+          <label class="field">
+            <span class="field-label">Confirm password</span>
+            <input id="signup-confirm" class="input" type="password" required minlength="6" autocomplete="new-password" placeholder="Re-enter your password" />
+          </label>
+          <p id="signup-error" class="auth-error hidden" role="alert"></p>
+          <button class="btn auth-submit" type="submit" id="signup-submit">Create account</button>
+        </form>
+
+        <p class="auth-foot">Already have an account? <a class="link" href="#/login">Sign in</a></p>
+      </div>
+    </section>
+  </template>
+
+  <div id="oauth-modal" class="oauth-modal hidden" role="dialog" aria-modal="true" aria-label="Provider sign in">
+    <div class="oauth-backdrop" id="oauth-backdrop"></div>
+    <div class="oauth-popup" id="oauth-popup"></div>
+  </div>
+
+  <template id="tpl-oauth-google">
+    <div class="oauth-google">
+      <div class="oauth-google-head">
+        <svg class="oauth-google-logo" viewBox="0 0 74 24" aria-hidden="true">
+          <path fill="#4285F4" d="M9.24 8.19v2.46h5.88c-.18 1.38-.64 2.39-1.34 3.1-.86.86-2.2 1.8-4.54 1.8-3.62 0-6.45-2.92-6.45-6.54s2.83-6.54 6.45-6.54c1.95 0 3.38.77 4.43 1.76L15.4 2.5C13.94 1.08 11.98 0 9.24 0 4.28 0 .11 4.04.11 9s4.17 9 9.13 9c2.68 0 4.7-.88 6.28-2.52 1.62-1.62 2.13-3.91 2.13-5.75 0-.57-.04-1.1-.13-1.54H9.24z"/>
+          <path fill="#EA4335" d="M25 6.19c-3.21 0-5.83 2.44-5.83 5.81 0 3.34 2.62 5.81 5.83 5.81s5.83-2.46 5.83-5.81c0-3.37-2.62-5.81-5.83-5.81zm0 9.33c-1.76 0-3.28-1.45-3.28-3.52 0-2.09 1.52-3.52 3.28-3.52s3.28 1.43 3.28 3.52c0 2.07-1.52 3.52-3.28 3.52z"/>
+          <path fill="#FBBC05" d="M47.94 7.49h-.09c-.57-.68-1.67-1.3-3.06-1.3-2.9 0-5.56 2.55-5.56 5.83 0 3.26 2.66 5.79 5.56 5.79 1.39 0 2.49-.62 3.06-1.32h.09v.84c0 2.22-1.19 3.41-3.1 3.41-1.56 0-2.53-1.12-2.93-2.07l-2.22.92c.64 1.54 2.33 3.43 5.15 3.43 2.99 0 5.52-1.76 5.52-6.05V6.49h-2.42v1zm-2.93 8.03c-1.76 0-3.23-1.47-3.23-3.5 0-2.05 1.47-3.54 3.23-3.54 1.74 0 3.1 1.5 3.1 3.54 0 2.03-1.36 3.5-3.1 3.5z"/>
+          <path fill="#34A853" d="M38.81 6.19c-3.21 0-5.83 2.44-5.83 5.81 0 3.34 2.62 5.81 5.83 5.81s5.83-2.46 5.83-5.81c0-3.37-2.62-5.81-5.83-5.81zm0 9.33c-1.76 0-3.28-1.45-3.28-3.52 0-2.09 1.52-3.52 3.28-3.52s3.28 1.43 3.28 3.52c0 2.07-1.52 3.52-3.28 3.52z" opacity="0"/>
+          <path fill="#34A853" d="M54.32.6h2.51v17.4h-2.51z"/>
+          <path fill="#EA4335" d="M64.36 15.52c-1.3 0-2.22-.59-2.82-1.76l7.77-3.21-.26-.66c-.48-1.3-1.96-3.7-4.97-3.7-2.99 0-5.48 2.35-5.48 5.81 0 3.26 2.46 5.81 5.76 5.81 2.66 0 4.2-1.63 4.84-2.57l-1.98-1.32c-.66.97-1.56 1.6-2.86 1.6zm-.18-7.13c1.03 0 1.91.53 2.2 1.28l-5.26 2.18c-.06-2.27 1.78-3.46 3.06-3.46z"/>
+        </svg>
+        <button type="button" class="oauth-close" id="oauth-close" aria-label="Close">×</button>
+      </div>
+      <div class="oauth-google-body">
+        <h2 class="oauth-google-h">Sign in with Google</h2>
+        <p class="oauth-google-sub">to continue to <strong>cardkave.app</strong></p>
+        <div class="oauth-account-list" id="oauth-account-list">
+          <button type="button" class="oauth-account" data-account="alex">
+            <span class="oauth-avatar" style="background:#4285F4">A</span>
+            <span class="oauth-account-info">
+              <span class="oauth-account-name">Alex Tanaka</span>
+              <span class="oauth-account-email">alex.tanaka@gmail.com</span>
+            </span>
+          </button>
+          <button type="button" class="oauth-account" data-account="jordan">
+            <span class="oauth-avatar" style="background:#34A853">J</span>
+            <span class="oauth-account-info">
+              <span class="oauth-account-name">Jordan Reeves</span>
+              <span class="oauth-account-email">jordan.reeves@gmail.com</span>
+            </span>
+          </button>
+          <button type="button" class="oauth-account oauth-add" id="oauth-add-google">
+            <span class="oauth-avatar oauth-avatar-add">+</span>
+            <span class="oauth-account-info">
+              <span class="oauth-account-name">Use another account</span>
+            </span>
+          </button>
+        </div>
+        <form class="oauth-custom hidden" id="oauth-google-custom">
+          <label class="field">
+            <span class="field-label">Email or phone</span>
+            <input class="input" type="email" id="oauth-google-email" required placeholder="you@gmail.com" />
+          </label>
+          <label class="field">
+            <span class="field-label">Full name</span>
+            <input class="input" type="text" id="oauth-google-name" required maxlength="40" placeholder="Your name" />
+          </label>
+          <div class="actions">
+            <button type="submit" class="btn">Continue</button>
+            <button type="button" class="btn ghost" id="oauth-google-back">Back</button>
+          </div>
+        </form>
+        <p class="oauth-google-legal">To continue, Google will share your name, email address, language preference, and profile picture with cardkave.app.</p>
+      </div>
+    </div>
+  </template>
+
+  <template id="tpl-oauth-apple">
+    <div class="oauth-apple">
+      <div class="oauth-apple-head">
+        <svg class="oauth-apple-logo" viewBox="0 0 16 18" aria-hidden="true">
+          <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
+        </svg>
+        <button type="button" class="oauth-close" id="oauth-close-apple" aria-label="Close">×</button>
+      </div>
+      <div class="oauth-apple-body">
+        <h2 class="oauth-apple-h">Use your Apple ID to sign in to CardKave.</h2>
+        <form id="oauth-apple-form">
+          <label class="field">
+            <span class="field-label">Apple ID</span>
+            <input class="input" type="email" id="oauth-apple-email" required placeholder="name@icloud.com" />
+          </label>
+          <label class="field">
+            <span class="field-label">Full name</span>
+            <input class="input" type="text" id="oauth-apple-name" required maxlength="40" placeholder="Your name" />
+          </label>
+          <label class="check oauth-apple-check">
+            <input type="checkbox" id="oauth-apple-hide" checked />
+            <span>Hide My Email <span class="muted">— Apple will create a relay address.</span></span>
+          </label>
+          <button type="submit" class="btn-apple-continue">Continue with Apple</button>
+        </form>
+      </div>
+    </div>
   </template>
 
   <template id="tpl-feed">
@@ -483,6 +694,6 @@
   </template>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
-  <script src="app.js?v=42" defer></script>
+  <script src="app.js?v=43" defer></script>
 </body>
 </html>

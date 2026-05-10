@@ -909,6 +909,157 @@ const profileStore = {
   isPaid() { return !!this.get()?.isPaid; },
 };
 
+// ---- Auth: accounts, sessions, password hashing
+async function hashPassword(password) {
+  const salt = "cardkave-v1";
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + password));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+const authStore = {
+  ACCOUNTS_KEY: "cardkave-accounts",
+  SESSION_KEY: "cardkave-session",
+
+  accounts() {
+    try { return JSON.parse(localStorage.getItem(this.ACCOUNTS_KEY)) || []; }
+    catch { return []; }
+  },
+  saveAccounts(arr) { localStorage.setItem(this.ACCOUNTS_KEY, JSON.stringify(arr)); },
+
+  findByEmail(email) {
+    const e = String(email).trim().toLowerCase();
+    return this.accounts().find(a => a.email === e);
+  },
+  byId(id) { return this.accounts().find(a => a.id === id); },
+
+  current() {
+    const id = localStorage.getItem(this.SESSION_KEY);
+    if (!id) return null;
+    return this.byId(id);
+  },
+  isAuthed() { return !!this.current(); },
+
+  setSession(id) {
+    localStorage.setItem(this.SESSION_KEY, id);
+    const acc = this.byId(id);
+    if (acc) {
+      profileStore.set({
+        name: acc.displayName,
+        location: acc.location || "",
+        isPaid: !!acc.isPaid,
+        email: acc.email,
+        provider: acc.provider,
+      });
+    }
+    refreshAuthUI();
+  },
+
+  signOut() {
+    localStorage.removeItem(this.SESSION_KEY);
+    localStorage.removeItem("user-profile");
+    refreshAuthUI();
+  },
+
+  async createEmailAccount({ name, email, location, password }) {
+    const e = String(email).trim().toLowerCase();
+    if (this.findByEmail(e)) {
+      throw new Error("An account with that email already exists. Try signing in instead.");
+    }
+    const passwordHash = await hashPassword(password);
+    const acc = {
+      id: uid("acc"),
+      email: e,
+      displayName: name.trim(),
+      location: (location || "").trim(),
+      provider: "email",
+      passwordHash,
+      isPaid: false,
+      createdAt: Date.now(),
+    };
+    const arr = this.accounts();
+    arr.push(acc);
+    this.saveAccounts(arr);
+    this.setSession(acc.id);
+    return acc;
+  },
+
+  async signInWithPassword({ email, password }) {
+    const acc = this.findByEmail(email);
+    if (!acc) throw new Error("No account found with that email.");
+    if (acc.provider !== "email") {
+      throw new Error(`This email is registered with ${acc.provider === "google" ? "Google" : "Apple"}. Use that to sign in.`);
+    }
+    const candidate = await hashPassword(password);
+    if (candidate !== acc.passwordHash) throw new Error("Incorrect password. Try again.");
+    this.setSession(acc.id);
+    return acc;
+  },
+
+  signInWithProvider({ provider, email, displayName, location }) {
+    const e = String(email).trim().toLowerCase();
+    const arr = this.accounts();
+    let acc = arr.find(a => a.email === e);
+    if (acc) {
+      if (acc.provider !== provider) {
+        const used = acc.provider === "email" ? "email and password" : (acc.provider === "google" ? "Google" : "Apple");
+        throw new Error(`This email is already registered with ${used}. Use that to sign in.`);
+      }
+      if (displayName && !acc.displayName) acc.displayName = displayName;
+      if (location && !acc.location) acc.location = location;
+      this.saveAccounts(arr);
+    } else {
+      acc = {
+        id: uid("acc"),
+        email: e,
+        displayName: (displayName || "").trim() || e.split("@")[0],
+        location: (location || "").trim(),
+        provider,
+        passwordHash: null,
+        isPaid: false,
+        createdAt: Date.now(),
+      };
+      arr.push(acc);
+      this.saveAccounts(arr);
+    }
+    this.setSession(acc.id);
+    return acc;
+  },
+
+  updateCurrent(patch) {
+    const id = localStorage.getItem(this.SESSION_KEY);
+    if (!id) return null;
+    const arr = this.accounts();
+    const i = arr.findIndex(a => a.id === id);
+    if (i < 0) return null;
+    arr[i] = { ...arr[i], ...patch };
+    this.saveAccounts(arr);
+    profileStore.set({
+      name: arr[i].displayName,
+      location: arr[i].location || "",
+      isPaid: !!arr[i].isPaid,
+      email: arr[i].email,
+      provider: arr[i].provider,
+    });
+    return arr[i];
+  },
+};
+
+function refreshAuthUI() {
+  refreshProfileNav();
+  refreshCounts();
+  const out = document.getElementById("nav-signout");
+  if (out) out.classList.toggle("hidden", !authStore.isAuthed());
+}
+
+const PUBLIC_ROUTES = new Set(["login", "signup"]);
+function isPublicRoute(parts) {
+  return PUBLIC_ROUTES.has(parts[0]);
+}
+
+function isValidEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());
+}
+
 const postStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); },
@@ -1107,8 +1258,11 @@ function refreshProfileNav() {
   const el = document.getElementById("nav-profile");
   if (!el) return;
   const p = profileStore.get();
-  if (p) {
+  const authed = typeof authStore !== "undefined" && authStore.isAuthed();
+  if (p && authed) {
     el.textContent = "";
+    el.setAttribute("href", "#/profile");
+    el.dataset.route = "profile";
     const av = document.createElement("span");
     av.className = "avatar avatar-sm";
     av.textContent = initials(p.name);
@@ -1124,6 +1278,8 @@ function refreshProfileNav() {
     }
   } else {
     el.textContent = "Sign in";
+    el.setAttribute("href", "#/login");
+    el.dataset.route = "login";
   }
 }
 
@@ -1247,26 +1403,298 @@ function renderProfile() {
   view.innerHTML = "";
   view.appendChild(tpl("tpl-profile"));
 
+  const acc = authStore.current();
   const me = profileStore.get();
-  document.getElementById("profile-title").textContent = me ? "Edit your profile" : "Set up your profile";
+  document.getElementById("profile-title").textContent = "Edit your profile";
+
+  const meta = document.getElementById("profile-meta");
+  if (acc) {
+    const providerLabel = acc.provider === "google" ? "Google" : acc.provider === "apple" ? "Apple" : "email";
+    meta.textContent = `Signed in as ${acc.email} via ${providerLabel}.`;
+  }
 
   const nameInp = document.getElementById("pf-name");
+  const emailInp = document.getElementById("pf-email");
   const locInp = document.getElementById("pf-loc");
   const paidInp = document.getElementById("pf-paid");
+
   if (me) {
-    nameInp.value = me.name;
-    locInp.value = me.location;
+    nameInp.value = me.name || "";
+    locInp.value = me.location || "";
     paidInp.checked = !!me.isPaid;
   }
+  if (emailInp) emailInp.value = acc?.email || "";
+
   document.getElementById("profile-form").addEventListener("submit", e => {
     e.preventDefault();
     const name = nameInp.value.trim();
     const loc = locInp.value.trim();
     if (!name || !loc) return;
-    profileStore.set({ name, location: loc, isPaid: paidInp.checked });
+    authStore.updateCurrent({ displayName: name, location: loc, isPaid: paidInp.checked });
     seedCommunityIfNeeded();
     location.hash = "#/feed";
   });
+
+  document.getElementById("profile-signout").addEventListener("click", () => {
+    if (!confirm("Sign out of CardKave?")) return;
+    authStore.signOut();
+    location.hash = "#/login";
+  });
+}
+
+// ---- Render: Login
+function renderLogin() {
+  setActiveNav("login");
+  view.innerHTML = "";
+  view.appendChild(tpl("tpl-login"));
+
+  const emailInp = document.getElementById("login-email");
+  const pwInp = document.getElementById("login-password");
+  const errEl = document.getElementById("login-error");
+  const submitBtn = document.getElementById("login-submit");
+  const showBtn = document.getElementById("login-show-pw");
+
+  showBtn.addEventListener("click", () => {
+    const showing = pwInp.type === "text";
+    pwInp.type = showing ? "password" : "text";
+    showBtn.textContent = showing ? "Show" : "Hide";
+  });
+
+  function showError(msg) {
+    errEl.textContent = msg;
+    errEl.classList.remove("hidden");
+  }
+  function clearError() {
+    errEl.textContent = "";
+    errEl.classList.add("hidden");
+  }
+
+  document.getElementById("login-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    clearError();
+    const email = emailInp.value.trim();
+    const password = pwInp.value;
+    if (!isValidEmail(email)) return showError("Enter a valid email address.");
+    if (password.length < 6) return showError("Password must be at least 6 characters.");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Signing in…";
+    try {
+      await authStore.signInWithPassword({ email, password });
+      seedCommunityIfNeeded();
+      location.hash = "#/browse";
+    } catch (err) {
+      showError(err.message || "Sign-in failed.");
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Sign in";
+    }
+  });
+
+  document.getElementById("login-google").addEventListener("click", () => {
+    runGoogleOAuth().then(profile => {
+      if (!profile) return;
+      try {
+        authStore.signInWithProvider({ provider: "google", ...profile });
+        seedCommunityIfNeeded();
+        location.hash = "#/browse";
+      } catch (err) { showError(err.message); }
+    });
+  });
+
+  document.getElementById("login-apple").addEventListener("click", () => {
+    runAppleOAuth().then(profile => {
+      if (!profile) return;
+      try {
+        authStore.signInWithProvider({ provider: "apple", ...profile });
+        seedCommunityIfNeeded();
+        location.hash = "#/browse";
+      } catch (err) { showError(err.message); }
+    });
+  });
+}
+
+// ---- Render: Signup
+function renderSignup() {
+  setActiveNav("signup");
+  view.innerHTML = "";
+  view.appendChild(tpl("tpl-signup"));
+
+  const nameInp = document.getElementById("signup-name");
+  const emailInp = document.getElementById("signup-email");
+  const locInp = document.getElementById("signup-location");
+  const pwInp = document.getElementById("signup-password");
+  const cfInp = document.getElementById("signup-confirm");
+  const errEl = document.getElementById("signup-error");
+  const submitBtn = document.getElementById("signup-submit");
+  const showBtn = document.getElementById("signup-show-pw");
+
+  showBtn.addEventListener("click", () => {
+    const showing = pwInp.type === "text";
+    pwInp.type = showing ? "password" : "text";
+    cfInp.type = showing ? "password" : "text";
+    showBtn.textContent = showing ? "Show" : "Hide";
+  });
+
+  function showError(msg) {
+    errEl.textContent = msg;
+    errEl.classList.remove("hidden");
+  }
+  function clearError() {
+    errEl.textContent = "";
+    errEl.classList.add("hidden");
+  }
+
+  document.getElementById("signup-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    clearError();
+    const name = nameInp.value.trim();
+    const email = emailInp.value.trim();
+    const loc = locInp.value.trim();
+    const password = pwInp.value;
+    const confirmPw = cfInp.value;
+    if (!name) return showError("Display name is required.");
+    if (!isValidEmail(email)) return showError("Enter a valid email address.");
+    if (!loc) return showError("City or area is required.");
+    if (password.length < 6) return showError("Password must be at least 6 characters.");
+    if (password !== confirmPw) return showError("Passwords don't match.");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Creating account…";
+    try {
+      await authStore.createEmailAccount({ name, email, location: loc, password });
+      seedCommunityIfNeeded();
+      window.location.hash = "#/browse";
+    } catch (err) {
+      showError(err.message || "Could not create account.");
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Create account";
+    }
+  });
+
+  document.getElementById("signup-google").addEventListener("click", () => {
+    runGoogleOAuth().then(profile => {
+      if (!profile) return;
+      try {
+        authStore.signInWithProvider({ provider: "google", ...profile, location: locInp.value.trim() });
+        seedCommunityIfNeeded();
+        location.hash = "#/browse";
+      } catch (err) { showError(err.message); }
+    });
+  });
+
+  document.getElementById("signup-apple").addEventListener("click", () => {
+    runAppleOAuth().then(profile => {
+      if (!profile) return;
+      try {
+        authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
+        seedCommunityIfNeeded();
+        location.hash = "#/browse";
+      } catch (err) { showError(err.message); }
+    });
+  });
+}
+
+// ---- OAuth simulators (Google / Apple)
+function openOAuthModal(templateId) {
+  const modal = document.getElementById("oauth-modal");
+  const popup = document.getElementById("oauth-popup");
+  popup.innerHTML = "";
+  popup.appendChild(tpl(templateId));
+  modal.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  return { modal, popup };
+}
+function closeOAuthModal() {
+  const modal = document.getElementById("oauth-modal");
+  const popup = document.getElementById("oauth-popup");
+  modal.classList.add("hidden");
+  popup.innerHTML = "";
+  document.body.style.overflow = "";
+}
+
+function runGoogleOAuth() {
+  return new Promise(resolve => {
+    const { popup } = openOAuthModal("tpl-oauth-google");
+    let settled = false;
+    function settle(value) {
+      if (settled) return;
+      settled = true;
+      closeOAuthModal();
+      resolve(value);
+    }
+    document.getElementById("oauth-close").addEventListener("click", () => settle(null));
+    document.getElementById("oauth-backdrop").addEventListener("click", () => settle(null));
+
+    const PRESETS = {
+      alex: { email: "alex.tanaka@gmail.com", displayName: "Alex Tanaka" },
+      jordan: { email: "jordan.reeves@gmail.com", displayName: "Jordan Reeves" },
+    };
+    popup.querySelectorAll(".oauth-account[data-account]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.account;
+        if (!PRESETS[key]) return;
+        showLoadingState(popup, "Signing in to Google…");
+        setTimeout(() => settle(PRESETS[key]), 650);
+      });
+    });
+
+    const list = document.getElementById("oauth-account-list");
+    const customForm = document.getElementById("oauth-google-custom");
+    document.getElementById("oauth-add-google").addEventListener("click", () => {
+      list.classList.add("hidden");
+      customForm.classList.remove("hidden");
+      document.getElementById("oauth-google-email").focus();
+    });
+    document.getElementById("oauth-google-back").addEventListener("click", () => {
+      customForm.classList.add("hidden");
+      list.classList.remove("hidden");
+    });
+    customForm.addEventListener("submit", e => {
+      e.preventDefault();
+      const email = document.getElementById("oauth-google-email").value.trim();
+      const name = document.getElementById("oauth-google-name").value.trim();
+      if (!isValidEmail(email) || !name) return;
+      showLoadingState(popup, "Signing in to Google…");
+      setTimeout(() => settle({ email, displayName: name }), 650);
+    });
+  });
+}
+
+function runAppleOAuth() {
+  return new Promise(resolve => {
+    const { popup } = openOAuthModal("tpl-oauth-apple");
+    let settled = false;
+    function settle(value) {
+      if (settled) return;
+      settled = true;
+      closeOAuthModal();
+      resolve(value);
+    }
+    document.getElementById("oauth-close-apple").addEventListener("click", () => settle(null));
+    document.getElementById("oauth-backdrop").addEventListener("click", () => settle(null));
+
+    document.getElementById("oauth-apple-form").addEventListener("submit", e => {
+      e.preventDefault();
+      const rawEmail = document.getElementById("oauth-apple-email").value.trim();
+      const name = document.getElementById("oauth-apple-name").value.trim();
+      const hide = document.getElementById("oauth-apple-hide").checked;
+      if (!isValidEmail(rawEmail) || !name) return;
+      const email = hide
+        ? `${Math.random().toString(36).slice(2, 10)}@privaterelay.appleid.com`
+        : rawEmail;
+      showLoadingState(popup, "Signing in with Apple…");
+      setTimeout(() => settle({ email, displayName: name }), 650);
+    });
+  });
+}
+
+function showLoadingState(popup, label) {
+  popup.innerHTML = `
+    <div class="oauth-loading">
+      <div class="oauth-spinner" aria-hidden="true"></div>
+      <p>${label}</p>
+    </div>
+  `;
 }
 
 // ---- Render: Feed
@@ -3026,10 +3454,22 @@ function makePoolCardOption(deck, card, source) {
 function route() {
   if (window.__cleanup) { window.__cleanup(); window.__cleanup = null; }
   window.scrollTo(0, 0);
-  const hash = location.hash || "#/browse";
+  const authed = authStore.isAuthed();
+  const hash = location.hash || (authed ? "#/browse" : "#/login");
   const parts = hash.replace(/^#\/?/, "").split("/");
   const [a, b, c] = parts;
 
+  if (!authed && !isPublicRoute(parts)) {
+    location.hash = "#/login";
+    return;
+  }
+  if (authed && (a === "login" || a === "signup")) {
+    location.hash = "#/browse";
+    return;
+  }
+
+  if (a === "login") return renderLogin();
+  if (a === "signup") return renderSignup();
   if (a === "p" && b) return renderDetail(b);
   if (a === "sets" && b) return renderSet(b);
   if (a === "collection") return renderCollection();
@@ -3054,8 +3494,16 @@ window.addEventListener("DOMContentLoaded", () => {
   seedEvents();
   seedCommunityIfNeeded();
   refreshCounts();
-  refreshProfileNav();
+  refreshAuthUI();
   paintLastUpdated();
+  const out = document.getElementById("nav-signout");
+  if (out) {
+    out.addEventListener("click", () => {
+      if (!confirm("Sign out of CardKave?")) return;
+      authStore.signOut();
+      location.hash = "#/login";
+    });
+  }
   route();
 });
 
