@@ -1,4 +1,43 @@
 // CardKave — minimalist Pokémon companion
+
+// ---- OAuth configuration ----
+// Fill in real client IDs here to enable production sign-in with Google/Apple.
+// While these are empty strings, the buttons fall back to the demo simulator.
+//
+// Google: register at https://console.cloud.google.com/apis/credentials
+//   Create an OAuth 2.0 Client ID of type "Web application".
+//   Add this site's origin (e.g. "https://shivanka3.github.io") under
+//   "Authorized JavaScript origins" — no redirect URI needed for the
+//   token client / GIS popup flow.
+//
+// Apple: register at https://developer.apple.com/account/resources/identifiers/list/serviceId
+//   Create a Services ID, enable "Sign in with Apple", and add this
+//   site's origin and a return URL (HTTPS only — Apple does not allow
+//   localhost). Apple Sign In does not work on http://localhost; deploy
+//   to GitHub Pages or another HTTPS host to test it.
+const OAUTH_CONFIG = {
+  google: {
+    clientId: "", // e.g. "1234567890-abcdef.apps.googleusercontent.com"
+  },
+  apple: {
+    clientId: "",     // e.g. "com.example.cardkave.signin" (Service ID)
+    redirectURI: "",  // e.g. "https://shivanka3.github.io/cardkave/"
+  },
+};
+
+// Sync the auth-mode body class immediately so the topbar doesn't flash on
+// auth pages before route() runs.
+(function preroute() {
+  const hash = location.hash || "";
+  const hasSession = !!localStorage.getItem("cardkave-session");
+  const onAuth = hash === "" || hash.startsWith("#/login") || hash.startsWith("#/signup");
+  if (onAuth && !hasSession) {
+    document.documentElement.classList.add("auth-mode");
+    if (document.body) document.body.classList.add("auth-mode");
+    else document.addEventListener("DOMContentLoaded", () => document.body.classList.add("auth-mode"), { once: true });
+  }
+})();
+
 const API = "https://pokeapi.co/api/v2";
 const DATA = "data"; // relative to index.html — works locally + on GitHub Pages
 const SPRITE = id => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`;
@@ -1613,6 +1652,53 @@ function closeOAuthModal() {
 }
 
 function runGoogleOAuth() {
+  if (OAUTH_CONFIG.google.clientId) return runGoogleOAuthReal();
+  return runGoogleOAuthSimulator();
+}
+
+function runGoogleOAuthReal() {
+  return new Promise(resolve => {
+    if (typeof google === "undefined" || !google.accounts || !google.accounts.oauth2) {
+      alert("Google Sign-In is still loading — try again in a moment.");
+      return resolve(null);
+    }
+    let resolved = false;
+    const finish = (value) => { if (!resolved) { resolved = true; resolve(value); } };
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: OAUTH_CONFIG.google.clientId,
+      scope: "openid email profile",
+      callback: async (resp) => {
+        if (resp.error || !resp.access_token) {
+          alert(resp.error_description || resp.error || "Google sign-in failed.");
+          return finish(null);
+        }
+        try {
+          const u = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+            headers: { Authorization: `Bearer ${resp.access_token}` },
+          }).then(r => {
+            if (!r.ok) throw new Error(`userinfo ${r.status}`);
+            return r.json();
+          });
+          if (!u.email) {
+            alert("Google did not return an email.");
+            return finish(null);
+          }
+          finish({ email: u.email, displayName: u.name || u.given_name || u.email.split("@")[0] });
+        } catch (e) {
+          alert("Could not load your Google profile: " + (e.message || e));
+          finish(null);
+        }
+      },
+      error_callback: (err) => {
+        if (err && err.type !== "popup_closed") alert(err.message || "Google sign-in failed.");
+        finish(null);
+      },
+    });
+    client.requestAccessToken();
+  });
+}
+
+function runGoogleOAuthSimulator() {
   return new Promise(resolve => {
     const { popup } = openOAuthModal("tpl-oauth-google");
     let settled = false;
@@ -1661,6 +1747,61 @@ function runGoogleOAuth() {
 }
 
 function runAppleOAuth() {
+  if (OAUTH_CONFIG.apple.clientId) return runAppleOAuthReal();
+  return runAppleOAuthSimulator();
+}
+
+function decodeJwt(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload + "=".repeat((4 - payload.length % 4) % 4);
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch { return null; }
+}
+
+function runAppleOAuthReal() {
+  return new Promise(resolve => {
+    if (typeof AppleID === "undefined" || !AppleID.auth) {
+      alert("Apple Sign-In is still loading — try again in a moment.");
+      return resolve(null);
+    }
+    try {
+      AppleID.auth.init({
+        clientId: OAUTH_CONFIG.apple.clientId,
+        scope: "name email",
+        redirectURI: OAUTH_CONFIG.apple.redirectURI || window.location.origin + window.location.pathname,
+        usePopup: true,
+      });
+    } catch (e) {
+      alert("Apple Sign-In init failed: " + (e.message || e));
+      return resolve(null);
+    }
+    AppleID.auth.signIn().then(data => {
+      const claims = decodeJwt(data?.authorization?.id_token);
+      const email = claims?.email || data?.user?.email;
+      if (!email) {
+        alert("Apple did not return an email.");
+        return resolve(null);
+      }
+      const userName = data?.user?.name;
+      const displayName = userName?.firstName
+        ? `${userName.firstName} ${userName.lastName || ""}`.trim()
+        : (claims?.name || email.split("@")[0]);
+      resolve({ email, displayName });
+    }).catch(err => {
+      const code = err && (err.error || err.code);
+      if (code && code !== "popup_closed_by_user" && code !== "user_cancelled_authorize") {
+        alert("Apple sign-in failed: " + (err.error || err.message || code));
+      }
+      resolve(null);
+    });
+  });
+}
+
+function runAppleOAuthSimulator() {
   return new Promise(resolve => {
     const { popup } = openOAuthModal("tpl-oauth-apple");
     let settled = false;
@@ -3467,6 +3608,10 @@ function route() {
     location.hash = "#/browse";
     return;
   }
+
+  const inAuth = a === "login" || a === "signup";
+  document.body.classList.toggle("auth-mode", inAuth);
+  document.documentElement.classList.toggle("auth-mode", inAuth);
 
   if (a === "login") return renderLogin();
   if (a === "signup") return renderSignup();
