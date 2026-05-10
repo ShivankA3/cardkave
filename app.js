@@ -996,6 +996,13 @@ const authStore = {
   signOut() {
     localStorage.removeItem(this.SESSION_KEY);
     localStorage.removeItem("user-profile");
+    // Tell Google not to auto-prompt on the next page load. Best-effort —
+    // safe no-op if the GIS script hasn't loaded.
+    try {
+      if (typeof google !== "undefined" && google.accounts && google.accounts.id) {
+        google.accounts.id.disableAutoSelect();
+      }
+    } catch {}
     refreshAuthUI();
   },
 
@@ -1089,6 +1096,29 @@ function refreshAuthUI() {
   const out = document.getElementById("nav-signout");
   if (out) out.classList.toggle("hidden", !authStore.isAuthed());
 }
+
+// Top-level logout. Clears the local session, asks Google to forget the user,
+// optionally confirms with the user, and sends them to the login page.
+//
+// Options:
+//   - confirm:   show a "Sign out of CardKave?" dialog first (default true)
+//   - redirect:  hash to navigate to after sign-out (default "#/login")
+//   - silent:    skip the redirect entirely (caller will handle it)
+//
+// Returns true if the session was cleared, false if the user cancelled.
+// Also exposed as window.logout so it can be called from devtools or hooks.
+function logout(options = {}) {
+  if (!authStore.isAuthed()) {
+    if (!options.silent) window.location.hash = options.redirect || "#/login";
+    return false;
+  }
+  const shouldConfirm = options.confirm !== false;
+  if (shouldConfirm && !window.confirm("Sign out of CardKave?")) return false;
+  authStore.signOut();
+  if (!options.silent) window.location.hash = options.redirect || "#/login";
+  return true;
+}
+window.logout = logout;
 
 const PUBLIC_ROUTES = new Set(["login", "signup"]);
 function isPublicRoute(parts) {
@@ -1474,11 +1504,7 @@ function renderProfile() {
     location.hash = "#/feed";
   });
 
-  document.getElementById("profile-signout").addEventListener("click", () => {
-    if (!confirm("Sign out of CardKave?")) return;
-    authStore.signOut();
-    location.hash = "#/login";
-  });
+  document.getElementById("profile-signout").addEventListener("click", () => logout());
 }
 
 // ---- Render: Login
@@ -3642,13 +3668,7 @@ window.addEventListener("DOMContentLoaded", () => {
   refreshAuthUI();
   paintLastUpdated();
   const out = document.getElementById("nav-signout");
-  if (out) {
-    out.addEventListener("click", () => {
-      if (!confirm("Sign out of CardKave?")) return;
-      authStore.signOut();
-      location.hash = "#/login";
-    });
-  }
+  if (out) out.addEventListener("click", () => logout());
   route();
 });
 
