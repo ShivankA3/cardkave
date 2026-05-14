@@ -6,15 +6,19 @@
 //
 // Google: register at https://console.cloud.google.com/apis/credentials
 //   Create an OAuth 2.0 Client ID of type "Web application".
-//   Add this site's origin (e.g. "https://shivanka3.github.io") under
-//   "Authorized JavaScript origins" — no redirect URI needed for the
-//   token client / GIS popup flow.
+//   Add ALL origins the app runs on under "Authorized JavaScript origins":
+//     - https://www.cardkave.com   (production)
+//     - https://cardkave.com       (apex, redirected to www but include anyway)
+//     - http://localhost:8765      (local dev with `npx http-server`)
+//   No redirect URI needed for the token-client popup flow.
 //
 // Apple: register at https://developer.apple.com/account/resources/identifiers/list/serviceId
 //   Create a Services ID, enable "Sign in with Apple", and add this
-//   site's origin and a return URL (HTTPS only — Apple does not allow
-//   localhost). Apple Sign In does not work on http://localhost; deploy
-//   to GitHub Pages or another HTTPS host to test it.
+//   site's domain (cardkave.com) plus a return URL:
+//     - Domain:     cardkave.com
+//     - Return URL: https://www.cardkave.com/
+//   Apple does NOT allow http://localhost; the popup flow only works on
+//   the live HTTPS domain.
 const OAUTH_CONFIG = {
   google: {
     clientId: "", // e.g. "1234567890-abcdef.apps.googleusercontent.com"
