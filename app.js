@@ -355,21 +355,28 @@ function makeSetCard(s) {
   return el;
 }
 
-// ---- Recently searched cards
-const recentCards = {
-  KEY: "recently-searched-cards",
-  MAX: 5,
+// ---- Recently searched queries
+const recentSearches = {
+  KEY: "recently-searched-queries",
+  MAX: 7,
   list() {
     try {
       const arr = JSON.parse(localStorage.getItem(this.KEY)) || [];
       return arr.slice(0, this.MAX);
     } catch { return []; }
   },
-  add(card) {
-    const snap = snapshotCard(card);
-    const list = this.list().filter(c => c.id !== snap.id);
-    list.unshift(snap);
+  add(query) {
+    const q = (query || "").trim();
+    if (!q) return;
+    const norm = q.toLowerCase();
+    const list = this.list().filter(s => s.toLowerCase() !== norm);
+    list.unshift(q);
     if (list.length > this.MAX) list.length = this.MAX;
+    try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
+  },
+  remove(query) {
+    const norm = (query || "").toLowerCase();
+    const list = this.list().filter(s => s.toLowerCase() !== norm);
     try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
   },
   clear() {
@@ -432,6 +439,7 @@ async function renderBrowse() {
     const grid = document.getElementById("grid");
     const loader = document.getElementById("loader");
     const search = document.getElementById("search");
+    const form = document.getElementById("set-search-form");
 
     let allSets = [];
     let cleanupLazy = null;
@@ -465,16 +473,17 @@ async function renderBrowse() {
         loader.textContent = "Couldn't load sets. Check your connection and try again.";
       });
 
-    let debounce;
-    search.addEventListener("input", e => {
-      clearTimeout(debounce);
-      const q = e.target.value;
-      debounce = setTimeout(() => render(q), 200);
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      render(search.value);
+    });
+
+    search.addEventListener("search", () => {
+      if (!search.value) render("");
     });
 
     cleanupSets = () => {
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
-      clearTimeout(debounce);
     };
   }
 
@@ -482,37 +491,69 @@ async function renderBrowse() {
     const search = document.getElementById("card-search");
     const status = document.getElementById("card-search-status");
     const grid = document.getElementById("card-search-grid");
-    const recentSection = document.getElementById("recent-section");
-    const recentGrid = document.getElementById("recent-grid");
-    const clearBtn = document.getElementById("clear-recent");
+    const form = document.getElementById("card-search-form");
+    const dropdown = document.getElementById("recent-dropdown");
 
     let searchToken = 0;
-    let debounce;
 
     const onCardOpen = (c) => {
-      recentCards.add(c);
-      paintRecent();
       openCardModal(c);
     };
 
     function paintRecent() {
-      const recents = recentCards.list();
-      recentGrid.innerHTML = "";
+      const recents = recentSearches.list();
+      dropdown.innerHTML = "";
       if (!recents.length) {
-        recentSection.classList.add("hidden");
+        dropdown.classList.add("hidden");
         return;
       }
-      recentSection.classList.remove("hidden");
       const frag = document.createDocumentFragment();
-      recents.forEach(c => frag.appendChild(makeTcgCardEl(c, { onOpen: onCardOpen })));
-      recentGrid.appendChild(frag);
+      recents.forEach(q => {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "recent-row";
+        row.setAttribute("role", "option");
+        row.innerHTML = `
+          <svg class="recent-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm10 2-4.35-4.35"/></svg>
+          <span class="recent-text"></span>
+          <span class="recent-remove" role="button" aria-label="Remove from recent searches">×</span>
+        `;
+        row.querySelector(".recent-text").textContent = q;
+        row.addEventListener("mousedown", e => {
+          if (e.target.classList.contains("recent-remove")) {
+            e.preventDefault();
+            e.stopPropagation();
+            recentSearches.remove(q);
+            paintRecent();
+            return;
+          }
+          e.preventDefault();
+          search.value = q;
+          hideDropdown();
+          performSearch(q, { save: true });
+        });
+        frag.appendChild(row);
+      });
+      dropdown.appendChild(frag);
     }
 
-    paintRecent();
+    function showDropdown() {
+      if (recentSearches.list().length) {
+        paintRecent();
+        dropdown.classList.remove("hidden");
+      }
+    }
+    function hideDropdown() {
+      dropdown.classList.add("hidden");
+    }
 
-    clearBtn.addEventListener("click", () => {
-      recentCards.clear();
-      paintRecent();
+    search.addEventListener("focus", showDropdown);
+    search.addEventListener("click", showDropdown);
+    search.addEventListener("blur", () => {
+      setTimeout(hideDropdown, 150);
+    });
+    search.addEventListener("keydown", e => {
+      if (e.key === "Escape") hideDropdown();
     });
 
     // Kick off the index + sets-by-id fetches up-front — by the time the user
@@ -521,18 +562,18 @@ async function renderBrowse() {
 
     let cleanupLazy = null;
 
-    async function performSearch(q) {
+    async function performSearch(q, opts = {}) {
       const myToken = ++searchToken;
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
       grid.innerHTML = "";
 
       const trimmed = q.trim();
       if (!trimmed) {
-        setStatus("Type a card name above to search across every set.", true);
+        setStatus("Press Enter to search across every set.", true);
         return;
       }
       if (trimmed.length < 2) {
-        setStatus("Keep typing…", true);
+        setStatus("Type at least 2 characters.", true);
         return;
       }
 
@@ -551,6 +592,7 @@ async function renderBrowse() {
       const matches = searchCardsByName(trimmed, index, setsById);
       if (!matches.length) {
         setStatus(`No cards found for "${trimmed}".`, true);
+        if (opts.save) { recentSearches.add(trimmed); paintRecent(); }
         return;
       }
 
@@ -562,6 +604,7 @@ async function renderBrowse() {
         { batchSize: 30 }
       );
       setStatus(`${cards.length} card${cards.length === 1 ? "" : "s"}`, false);
+      if (opts.save) { recentSearches.add(trimmed); paintRecent(); }
     }
 
     function setStatus(text, visible) {
@@ -569,14 +612,15 @@ async function renderBrowse() {
       status.classList.toggle("hidden", !visible);
     }
 
-    search.addEventListener("input", e => {
-      clearTimeout(debounce);
-      const q = e.target.value;
-      debounce = setTimeout(() => performSearch(q), 200);
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      hideDropdown();
+      performSearch(search.value, { save: true });
     });
 
+    paintRecent();
+
     cleanupCards = () => {
-      clearTimeout(debounce);
       searchToken++;
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
     };
