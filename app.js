@@ -1,4 +1,47 @@
 // CardKave — minimalist Pokémon companion
+
+// ---- OAuth configuration ----
+// Fill in real client IDs here to enable production sign-in with Google/Apple.
+// While these are empty strings, the buttons fall back to the demo simulator.
+//
+// Google: register at https://console.cloud.google.com/apis/credentials
+//   Create an OAuth 2.0 Client ID of type "Web application".
+//   Add ALL origins the app runs on under "Authorized JavaScript origins":
+//     - https://www.cardkave.com   (production)
+//     - https://cardkave.com       (apex, redirected to www but include anyway)
+//     - http://localhost:8765      (local dev with `npx http-server`)
+//   No redirect URI needed for the token-client popup flow.
+//
+// Apple: register at https://developer.apple.com/account/resources/identifiers/list/serviceId
+//   Create a Services ID, enable "Sign in with Apple", and add this
+//   site's domain (cardkave.com) plus a return URL:
+//     - Domain:     cardkave.com
+//     - Return URL: https://www.cardkave.com/
+//   Apple does NOT allow http://localhost; the popup flow only works on
+//   the live HTTPS domain.
+const OAUTH_CONFIG = {
+  google: {
+    clientId: "", // e.g. "1234567890-abcdef.apps.googleusercontent.com"
+  },
+  apple: {
+    clientId: "",     // e.g. "com.example.cardkave.signin" (Service ID)
+    redirectURI: "",  // e.g. "https://shivanka3.github.io/cardkave/"
+  },
+};
+
+// Sync the auth-mode body class immediately so the topbar doesn't flash on
+// auth pages before route() runs.
+(function preroute() {
+  const hash = location.hash || "";
+  const hasSession = !!localStorage.getItem("cardkave-session");
+  const onAuth = hash === "" || hash.startsWith("#/login") || hash.startsWith("#/signup");
+  if (onAuth && !hasSession) {
+    document.documentElement.classList.add("auth-mode");
+    if (document.body) document.body.classList.add("auth-mode");
+    else document.addEventListener("DOMContentLoaded", () => document.body.classList.add("auth-mode"), { once: true });
+  }
+})();
+
 const API = "https://pokeapi.co/api/v2";
 const DATA = "data"; // relative to index.html — works locally + on GitHub Pages
 const SPRITE = id => `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`;
@@ -957,6 +1000,13 @@ const authStore = {
   signOut() {
     localStorage.removeItem(this.SESSION_KEY);
     localStorage.removeItem("user-profile");
+    // Tell Google not to auto-prompt on the next page load. Best-effort —
+    // safe no-op if the GIS script hasn't loaded.
+    try {
+      if (typeof google !== "undefined" && google.accounts && google.accounts.id) {
+        google.accounts.id.disableAutoSelect();
+      }
+    } catch {}
     refreshAuthUI();
   },
 
@@ -1050,6 +1100,29 @@ function refreshAuthUI() {
   const out = document.getElementById("nav-signout");
   if (out) out.classList.toggle("hidden", !authStore.isAuthed());
 }
+
+// Top-level logout. Clears the local session, asks Google to forget the user,
+// optionally confirms with the user, and sends them to the login page.
+//
+// Options:
+//   - confirm:   show a "Sign out of CardKave?" dialog first (default true)
+//   - redirect:  hash to navigate to after sign-out (default "#/login")
+//   - silent:    skip the redirect entirely (caller will handle it)
+//
+// Returns true if the session was cleared, false if the user cancelled.
+// Also exposed as window.logout so it can be called from devtools or hooks.
+function logout(options = {}) {
+  if (!authStore.isAuthed()) {
+    if (!options.silent) window.location.hash = options.redirect || "#/login";
+    return false;
+  }
+  const shouldConfirm = options.confirm !== false;
+  if (shouldConfirm && !window.confirm("Sign out of CardKave?")) return false;
+  authStore.signOut();
+  if (!options.silent) window.location.hash = options.redirect || "#/login";
+  return true;
+}
+window.logout = logout;
 
 const PUBLIC_ROUTES = new Set(["login", "signup"]);
 function isPublicRoute(parts) {
@@ -1435,11 +1508,7 @@ function renderProfile() {
     location.hash = "#/feed";
   });
 
-  document.getElementById("profile-signout").addEventListener("click", () => {
-    if (!confirm("Sign out of CardKave?")) return;
-    authStore.signOut();
-    location.hash = "#/login";
-  });
+  document.getElementById("profile-signout").addEventListener("click", () => logout());
 }
 
 // ---- Render: Login
@@ -1613,6 +1682,53 @@ function closeOAuthModal() {
 }
 
 function runGoogleOAuth() {
+  if (OAUTH_CONFIG.google.clientId) return runGoogleOAuthReal();
+  return runGoogleOAuthSimulator();
+}
+
+function runGoogleOAuthReal() {
+  return new Promise(resolve => {
+    if (typeof google === "undefined" || !google.accounts || !google.accounts.oauth2) {
+      alert("Google Sign-In is still loading — try again in a moment.");
+      return resolve(null);
+    }
+    let resolved = false;
+    const finish = (value) => { if (!resolved) { resolved = true; resolve(value); } };
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: OAUTH_CONFIG.google.clientId,
+      scope: "openid email profile",
+      callback: async (resp) => {
+        if (resp.error || !resp.access_token) {
+          alert(resp.error_description || resp.error || "Google sign-in failed.");
+          return finish(null);
+        }
+        try {
+          const u = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+            headers: { Authorization: `Bearer ${resp.access_token}` },
+          }).then(r => {
+            if (!r.ok) throw new Error(`userinfo ${r.status}`);
+            return r.json();
+          });
+          if (!u.email) {
+            alert("Google did not return an email.");
+            return finish(null);
+          }
+          finish({ email: u.email, displayName: u.name || u.given_name || u.email.split("@")[0] });
+        } catch (e) {
+          alert("Could not load your Google profile: " + (e.message || e));
+          finish(null);
+        }
+      },
+      error_callback: (err) => {
+        if (err && err.type !== "popup_closed") alert(err.message || "Google sign-in failed.");
+        finish(null);
+      },
+    });
+    client.requestAccessToken();
+  });
+}
+
+function runGoogleOAuthSimulator() {
   return new Promise(resolve => {
     const { popup } = openOAuthModal("tpl-oauth-google");
     let settled = false;
@@ -1661,6 +1777,61 @@ function runGoogleOAuth() {
 }
 
 function runAppleOAuth() {
+  if (OAUTH_CONFIG.apple.clientId) return runAppleOAuthReal();
+  return runAppleOAuthSimulator();
+}
+
+function decodeJwt(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payload + "=".repeat((4 - payload.length % 4) % 4);
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch { return null; }
+}
+
+function runAppleOAuthReal() {
+  return new Promise(resolve => {
+    if (typeof AppleID === "undefined" || !AppleID.auth) {
+      alert("Apple Sign-In is still loading — try again in a moment.");
+      return resolve(null);
+    }
+    try {
+      AppleID.auth.init({
+        clientId: OAUTH_CONFIG.apple.clientId,
+        scope: "name email",
+        redirectURI: OAUTH_CONFIG.apple.redirectURI || window.location.origin + window.location.pathname,
+        usePopup: true,
+      });
+    } catch (e) {
+      alert("Apple Sign-In init failed: " + (e.message || e));
+      return resolve(null);
+    }
+    AppleID.auth.signIn().then(data => {
+      const claims = decodeJwt(data?.authorization?.id_token);
+      const email = claims?.email || data?.user?.email;
+      if (!email) {
+        alert("Apple did not return an email.");
+        return resolve(null);
+      }
+      const userName = data?.user?.name;
+      const displayName = userName?.firstName
+        ? `${userName.firstName} ${userName.lastName || ""}`.trim()
+        : (claims?.name || email.split("@")[0]);
+      resolve({ email, displayName });
+    }).catch(err => {
+      const code = err && (err.error || err.code);
+      if (code && code !== "popup_closed_by_user" && code !== "user_cancelled_authorize") {
+        alert("Apple sign-in failed: " + (err.error || err.message || code));
+      }
+      resolve(null);
+    });
+  });
+}
+
+function runAppleOAuthSimulator() {
   return new Promise(resolve => {
     const { popup } = openOAuthModal("tpl-oauth-apple");
     let settled = false;
@@ -3468,6 +3639,10 @@ function route() {
     return;
   }
 
+  const inAuth = a === "login" || a === "signup";
+  document.body.classList.toggle("auth-mode", inAuth);
+  document.documentElement.classList.toggle("auth-mode", inAuth);
+
   if (a === "login") return renderLogin();
   if (a === "signup") return renderSignup();
   if (a === "p" && b) return renderDetail(b);
@@ -3497,13 +3672,7 @@ window.addEventListener("DOMContentLoaded", () => {
   refreshAuthUI();
   paintLastUpdated();
   const out = document.getElementById("nav-signout");
-  if (out) {
-    out.addEventListener("click", () => {
-      if (!confirm("Sign out of CardKave?")) return;
-      authStore.signOut();
-      location.hash = "#/login";
-    });
-  }
+  if (out) out.addEventListener("click", () => logout());
   route();
 });
 
