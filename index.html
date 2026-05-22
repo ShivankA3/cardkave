@@ -696,6 +696,12 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script type="text/javascript" src="https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js" async defer></script>
-  <script src="app.js?v=44" defer></script>
+  <!-- Firebase compat SDKs — load before firebase-config.js + cloud-sync.js + app.js. -->
+  <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js" defer></script>
+  <script src="firebase-config.js?v=1" defer></script>
+  <script src="cloud-sync.js?v=1" defer></script>
+  <script src="app.js?v=45" defer></script>
 </body>
 </html>
