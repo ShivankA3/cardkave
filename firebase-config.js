@@ -9,12 +9,13 @@
 // While apiKey is "REPLACE_ME", the app skips Firebase init and runs in
 // local-only mode — nothing is sent to the cloud, no behavior changes.
 const FIREBASE_CONFIG = {
-  apiKey:            "REPLACE_ME",
-  authDomain:        "REPLACE_ME.firebaseapp.com",
-  projectId:         "REPLACE_ME",
-  storageBucket:     "REPLACE_ME.appspot.com",
-  messagingSenderId: "REPLACE_ME",
-  appId:             "REPLACE_ME",
+  apiKey:            "AIzaSyBUd6YV3wVAihLrcOWNMtTHUlmh1FL3JNQ",
+  authDomain:        "cardkave-20781.firebaseapp.com",
+  projectId:         "cardkave-20781",
+  storageBucket:     "cardkave-20781.firebasestorage.app",
+  messagingSenderId: "1050098822847",
+  appId:             "1:1050098822847:web:d45b8de98cae80d5bda00a",
+  measurementId: "G-QE8WRN2YSD"
 };
 
 (function initFirebase() {
