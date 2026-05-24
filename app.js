@@ -381,6 +381,10 @@ const recentCards = {
     if (list.length > this.MAX) list.length = this.MAX;
     try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
   },
+  remove(id) {
+    const list = this.list().filter(c => c.id !== id);
+    try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
+  },
   clear() {
     try { localStorage.removeItem(this.KEY); } catch {}
   },
@@ -474,29 +478,34 @@ async function renderBrowse() {
         loader.textContent = "Couldn't load sets. Check your connection and try again.";
       });
 
-    let debounce;
-    search.addEventListener("input", e => {
-      clearTimeout(debounce);
-      const q = e.target.value;
-      debounce = setTimeout(() => render(q), 200);
+    // Search only runs on Enter — auto-search-as-you-type feels noisy when
+    // there are this many sets. Clearing the input restores the default view
+    // immediately (empty isn't really a "search").
+    search.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        render(search.value);
+      }
+    });
+    search.addEventListener("input", () => {
+      if (search.value === "") render("");
     });
 
     cleanupSets = () => {
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
-      clearTimeout(debounce);
     };
   }
 
   function initCardsPanel() {
+    const wrap = cardsPanel.querySelector(".card-search-wrap");
     const search = document.getElementById("card-search");
     const status = document.getElementById("card-search-status");
     const grid = document.getElementById("card-search-grid");
-    const recentSection = document.getElementById("recent-section");
-    const recentGrid = document.getElementById("recent-grid");
+    const dropdown = document.getElementById("recent-dropdown");
+    const recentList = document.getElementById("recent-list");
     const clearBtn = document.getElementById("clear-recent");
 
     let searchToken = 0;
-    let debounce;
 
     const onCardOpen = (c) => {
       recentCards.add(c);
@@ -504,24 +513,114 @@ async function renderBrowse() {
       openCardModal(c);
     };
 
-    function paintRecent() {
-      const recents = recentCards.list();
-      recentGrid.innerHTML = "";
-      if (!recents.length) {
-        recentSection.classList.add("hidden");
-        return;
+    function makeRecentItem(c) {
+      const row = document.createElement("div");
+      row.className = "recent-item-row";
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "recent-item";
+      btn.setAttribute("aria-label", `Open ${c.name}`);
+
+      const icon = document.createElement("span");
+      icon.className = "recent-item-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+      const thumb = document.createElement("span");
+      thumb.className = "recent-item-thumb";
+      if (c.images?.small) {
+        const img = document.createElement("img");
+        img.src = c.images.small;
+        img.alt = "";
+        img.loading = "lazy";
+        thumb.appendChild(img);
       }
-      recentSection.classList.remove("hidden");
-      const frag = document.createDocumentFragment();
-      recents.forEach(c => frag.appendChild(makeTcgCardEl(c, { onOpen: onCardOpen })));
-      recentGrid.appendChild(frag);
+
+      const text = document.createElement("span");
+      text.className = "recent-item-text";
+      const nameEl = document.createElement("span");
+      nameEl.className = "recent-item-name";
+      nameEl.textContent = c.name || "Unknown";
+      const setEl = document.createElement("span");
+      setEl.className = "recent-item-set";
+      setEl.textContent = c.set?.name || "";
+      text.appendChild(nameEl);
+      text.appendChild(setEl);
+
+      btn.appendChild(icon);
+      btn.appendChild(thumb);
+      btn.appendChild(text);
+
+      // mousedown would blur the input before click fires; suppress it.
+      btn.addEventListener("mousedown", e => e.preventDefault());
+      btn.addEventListener("click", () => {
+        closeDropdown();
+        onCardOpen(c);
+      });
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "recent-item-remove";
+      remove.setAttribute("aria-label", `Remove ${c.name} from recent searches`);
+      remove.textContent = "×";
+      remove.addEventListener("mousedown", e => e.preventDefault());
+      remove.addEventListener("click", e => {
+        e.stopPropagation();
+        recentCards.remove(c.id);
+        paintRecent();
+      });
+
+      row.appendChild(btn);
+      row.appendChild(remove);
+      return row;
     }
 
-    paintRecent();
+    function paintRecent() {
+      const recents = recentCards.list();
+      recentList.innerHTML = "";
+      if (!recents.length) {
+        dropdown.classList.add("hidden");
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      recents.forEach(c => frag.appendChild(makeRecentItem(c)));
+      recentList.appendChild(frag);
+    }
 
+    function openDropdown() {
+      paintRecent();
+      if (!recentCards.list().length) return;
+      dropdown.classList.remove("hidden");
+    }
+    function closeDropdown() {
+      dropdown.classList.add("hidden");
+    }
+
+    search.addEventListener("focus", () => {
+      if (!search.value.trim()) openDropdown();
+    });
+    search.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        closeDropdown();
+        performSearch(search.value);
+      } else if (e.key === "Escape") {
+        closeDropdown();
+        search.blur();
+      }
+    });
+
+    const onDocMouseDown = (e) => {
+      if (!wrap.contains(e.target)) closeDropdown();
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+
+    clearBtn.addEventListener("mousedown", e => e.preventDefault());
     clearBtn.addEventListener("click", () => {
       recentCards.clear();
       paintRecent();
+      closeDropdown();
     });
 
     // Kick off the index + sets-by-id fetches up-front — by the time the user
@@ -578,16 +677,22 @@ async function renderBrowse() {
       status.classList.toggle("hidden", !visible);
     }
 
-    search.addEventListener("input", e => {
-      clearTimeout(debounce);
-      const q = e.target.value;
-      debounce = setTimeout(() => performSearch(q), 200);
+    // Search runs on Enter only (handled in the keydown listener above).
+    // Typing manages dropdown visibility; emptying the input resets the
+    // results to the prompt state immediately.
+    search.addEventListener("input", () => {
+      if (search.value.trim()) {
+        closeDropdown();
+      } else {
+        if (document.activeElement === search) openDropdown();
+        performSearch("");
+      }
     });
 
     cleanupCards = () => {
-      clearTimeout(debounce);
       searchToken++;
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
+      document.removeEventListener("mousedown", onDocMouseDown);
     };
   }
 
@@ -1024,7 +1129,6 @@ const authStore = {
       profileStore.set({
         name: acc.displayName,
         location: acc.location || "",
-        isPaid: !!acc.isPaid,
         email: acc.email,
         provider: acc.provider,
       });
@@ -1081,7 +1185,6 @@ const authStore = {
       location: (location || "").trim(),
       provider: "email",
       passwordHash,
-      isPaid: false,
       createdAt: Date.now(),
     };
     const arr = this.accounts();
@@ -1151,7 +1254,6 @@ const authStore = {
         location: (location || "").trim(),
         provider,
         passwordHash: null,
-        isPaid: false,
         createdAt: Date.now(),
       };
       arr.push(acc);
@@ -1191,7 +1293,6 @@ const authStore = {
     profileStore.set({
       name: arr[i].displayName,
       location: arr[i].location || "",
-      isPaid: !!arr[i].isPaid,
       email: arr[i].email,
       provider: arr[i].provider,
     });
@@ -1467,12 +1568,6 @@ function refreshProfileNav() {
     nm.textContent = p.name;
     el.appendChild(av);
     el.appendChild(nm);
-    if (p.isPaid) {
-      const pro = document.createElement("span");
-      pro.className = "badge-pro";
-      pro.textContent = "Pro";
-      el.appendChild(pro);
-    }
   } else {
     el.textContent = "Sign in";
     el.setAttribute("href", "#/login");
@@ -1482,11 +1577,11 @@ function refreshProfileNav() {
 
 // ---- Seed data (demo content)
 const SEED_USERS = [
-  { name: "Maya", location: "Brooklyn, NY", paid: true },
-  { name: "Hiro", location: "Tokyo, Japan", paid: true },
-  { name: "Lena", location: "London, UK", paid: true },
-  { name: "Diego", location: "Austin, TX", paid: false },
-  { name: "Sven", location: "Berlin, Germany", paid: true },
+  { name: "Maya", location: "Brooklyn, NY" },
+  { name: "Hiro", location: "Tokyo, Japan" },
+  { name: "Lena", location: "London, UK" },
+  { name: "Diego", location: "Austin, TX" },
+  { name: "Sven", location: "Berlin, Germany" },
 ];
 
 const SEED_GROUPS = [
@@ -1516,7 +1611,6 @@ function seedFeed() {
     description: g.description,
     location: g.location,
     createdBy: g.createdBy,
-    createdByPaid: true,
     createdAt: Date.now() - 60 * 60 * 24 * 7 * 1000,
     members: g.members.slice(),
   }));
@@ -1529,7 +1623,6 @@ function seedFeed() {
       id: `seed-p-${i}`,
       authorName: u.name,
       authorLocation: u.location,
-      authorPaid: u.paid,
       content: p.content,
       card: null,
       groupId: null,
@@ -1561,7 +1654,6 @@ function seedEvents() {
       maxPeople: e.maxPeople,
       photos: [],
       createdBy: e.createdBy,
-      createdByPaid: !!u?.paid,
       createdAt: Date.now() - e.daysAgo * 24 * 60 * 60 * 1000,
       verified: e.verified,
       attendees: e.attendees.slice(),
@@ -1587,7 +1679,6 @@ function seedCommunityIfNeeded() {
     id: `community-${locSlug}-${i}`,
     authorName: p.authorName,
     authorLocation: me.location,
-    authorPaid: false,
     content: p.content,
     card: null,
     groupId: null,
@@ -1621,12 +1712,10 @@ function renderProfile() {
   const nameInp = document.getElementById("pf-name");
   const emailInp = document.getElementById("pf-email");
   const locInp = document.getElementById("pf-loc");
-  const paidInp = document.getElementById("pf-paid");
 
   if (me) {
     nameInp.value = me.name || "";
     locInp.value = me.location || "";
-    paidInp.checked = !!me.isPaid;
   }
   if (emailInp) emailInp.value = acc?.email || "";
 
@@ -1635,7 +1724,7 @@ function renderProfile() {
     const name = nameInp.value.trim();
     const loc = locInp.value.trim();
     if (!name || !loc) return;
-    authStore.updateCurrent({ displayName: name, location: loc, isPaid: paidInp.checked });
+    authStore.updateCurrent({ displayName: name, location: loc });
     seedCommunityIfNeeded();
     location.hash = "#/feed";
   });
@@ -2085,12 +2174,6 @@ function makePostEl(post, me) {
   const name = document.createElement("strong");
   name.textContent = post.authorName;
   nameRow.appendChild(name);
-  if (post.authorPaid) {
-    const pro = document.createElement("span");
-    pro.className = "badge-pro";
-    pro.textContent = "Pro";
-    nameRow.appendChild(pro);
-  }
   meta.appendChild(nameRow);
 
   const sub = document.createElement("div");
@@ -2210,7 +2293,6 @@ function mountCompose(host, opts) {
       id: uid("p"),
       authorName: me.name,
       authorLocation: me.location,
-      authorPaid: !!me.isPaid,
       content: text,
       card: attachedCard,
       groupId: groupId || target.value || null,
@@ -2240,10 +2322,6 @@ function renderGroups() {
   const newHost = document.getElementById("new-group-host");
   newBtn.addEventListener("click", () => {
     if (!me) { location.hash = "#/profile"; return; }
-    if (!me.isPaid) {
-      alert("Premium members only. Toggle Premium in your profile to try this in the demo.");
-      return;
-    }
     if (newHost.firstChild) { newHost.innerHTML = ""; return; }
     newHost.appendChild(tpl("tpl-new-group"));
     document.getElementById("ng-loc").value = me.location;
@@ -2257,7 +2335,7 @@ function renderGroups() {
       const g = {
         id: uid("g"),
         name, description: desc, location: loc,
-        createdBy: me.name, createdByPaid: true,
+        createdBy: me.name,
         createdAt: Date.now(),
         members: [me.name],
       };
@@ -2578,7 +2656,6 @@ function mountNewEventForm(host, me, onCreated) {
       maxPeople: max,
       photos: photoData.slice(),
       createdBy: me.name,
-      createdByPaid: !!me.isPaid,
       createdAt: Date.now(),
       verified: preVerified,
       attendees: [me.name],
@@ -2739,9 +2816,9 @@ function statusLabel(s) {
 }
 
 function tradeOtherParty(trade, me) {
-  if (!me) return { name: trade.toUserName, location: trade.toUserLocation, paid: trade.toUserPaid };
-  if (trade.fromUserName === me.name) return { name: trade.toUserName, location: trade.toUserLocation, paid: trade.toUserPaid };
-  return { name: trade.fromUserName, location: trade.fromUserLocation, paid: trade.fromUserPaid };
+  if (!me) return { name: trade.toUserName, location: trade.toUserLocation };
+  if (trade.fromUserName === me.name) return { name: trade.toUserName, location: trade.toUserLocation };
+  return { name: trade.fromUserName, location: trade.fromUserLocation };
 }
 
 // ---- Render: Trades index
@@ -2893,12 +2970,6 @@ function makeMatchCard(match, me) {
   const nm = document.createElement("strong");
   nm.textContent = match.user.name;
   nameRow.appendChild(nm);
-  if (match.user.paid) {
-    const b = document.createElement("span");
-    b.className = "badge-pro";
-    b.textContent = "Pro";
-    nameRow.appendChild(b);
-  }
   if (isLocal) {
     const b = document.createElement("span");
     b.className = "badge-local";
@@ -3002,10 +3073,8 @@ function renderProposeTrade(otherUserName) {
       id: uid("t"),
       fromUserName: me.name,
       fromUserLocation: me.location,
-      fromUserPaid: !!me.isPaid,
       toUserName: match.user.name,
       toUserLocation: match.user.location,
-      toUserPaid: !!match.user.paid,
       fromCard: snapshotCard(fromCard),
       toCard: snapshotCard(toCard),
       status: "proposed",
@@ -3131,16 +3200,10 @@ function paintTradeDetail(id) {
     actionsHost.appendChild(note);
   }
 
-  // Edit (Pro only, participants, not declined)
   const editHost = document.getElementById("trade-edit-host");
   editHost.innerHTML = "";
-  if (isParticipant && me?.isPaid && trade.status !== "declined") {
+  if (isParticipant && trade.status !== "declined") {
     mountEditTrade(editHost, trade, isFromUser, () => paintTradeDetail(id));
-  } else if (isParticipant && trade.status !== "declined" && me && !me.isPaid) {
-    const note = document.createElement("p");
-    note.className = "muted edit-locked";
-    note.innerHTML = `<span class="badge-pro">Pro</span> Premium members can edit a trade to swap which cards are involved. <a href="#/profile" class="link">Upgrade</a>.`;
-    editHost.appendChild(note);
   }
 
   // Messages
@@ -3290,7 +3353,6 @@ function mountEditTrade(host, trade, isFromUser, onSaved) {
 }
 
 // ---- Decks feature
-const FREE_DECK_LIMIT = 2;
 const DECK_MAX_QTY = 4;
 
 const deckStore = {
@@ -3461,21 +3523,10 @@ function renderDecks() {
   }
 
   const myDecks = deckStore.forUser(me.name);
-  const atLimit = !me.isPaid && myDecks.length >= FREE_DECK_LIMIT;
 
-  if (me.isPaid) {
-    ctx.innerHTML = `<span class="badge-pro">Pro</span> Unlimited decks. Build, save, and export as PDF.`;
-  } else if (atLimit) {
-    ctx.innerHTML = `Free accounts can save up to <strong>${FREE_DECK_LIMIT}</strong> decks. <a href="#/profile" class="link">Upgrade to Premium</a> for unlimited decks.`;
-  } else {
-    ctx.innerHTML = `${myDecks.length} of ${FREE_DECK_LIMIT} decks used. <a href="#/profile" class="link">Upgrade to Premium</a> for unlimited decks.`;
-  }
+  ctx.textContent = "Build, save, and export decklists as PDF.";
 
   newBtn.addEventListener("click", () => {
-    if (atLimit) {
-      alert(`Free accounts are limited to ${FREE_DECK_LIMIT} decks. Toggle Premium in your profile to add more.`);
-      return;
-    }
     if (newHost.firstChild) { newHost.innerHTML = ""; return; }
     newHost.appendChild(tpl("tpl-new-deck"));
     document.getElementById("nd-cancel").addEventListener("click", () => { newHost.innerHTML = ""; });
