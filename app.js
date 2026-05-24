@@ -50,7 +50,7 @@ const TOTAL = 1025;
 
 const store = {
   get(key) { try { return JSON.parse(localStorage.getItem(key)) || []; } catch { return []; } },
-  set(key, v) { localStorage.setItem(key, JSON.stringify(v)); refreshCounts(); },
+  set(key, v) { localStorage.setItem(key, JSON.stringify(v)); cloudPush(key, v); refreshCounts(); },
   toggle(key, id) {
     const list = store.get(key);
     const i = list.indexOf(id);
@@ -60,6 +60,13 @@ const store = {
   },
   has(key, id) { return store.get(key).includes(id); },
 };
+
+// Mirror a store write to Firestore via cloudSync, if cloud is enabled +
+// the user is signed in. Safe to call before cloud-sync.js loads (the
+// stub no-ops in local-only mode).
+function cloudPush(key, value) {
+  try { if (window.cloudSync && cloudSync.push) cloudSync.push(key, value); } catch {}
+}
 
 function snapshotCard(c) {
   return {
@@ -99,6 +106,7 @@ function makeCardStore(key) {
         list.unshift({ ...snapshotCard(card), quantity: 1 });
       }
       localStorage.setItem(key, JSON.stringify(list));
+      cloudPush(key, list);
       refreshCounts();
       return list[i >= 0 ? i : 0].quantity;
     },
@@ -111,6 +119,7 @@ function makeCardStore(key) {
       if (newQty <= 0) list.splice(i, 1);
       else list[i] = { ...list[i], quantity: newQty };
       localStorage.setItem(key, JSON.stringify(list));
+      cloudPush(key, list);
       refreshCounts();
       return Math.max(0, newQty);
     },
@@ -1053,10 +1062,15 @@ const renderCardWishlist = () => renderCardList(
 // ---- Feed: profile, posts, groups
 const profileStore = {
   get() { try { return JSON.parse(localStorage.getItem("user-profile")); } catch { return null; } },
-  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); refreshProfileNav(); },
+  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); cloudPush("user-profile", p); refreshProfileNav(); },
+  isPaid() { return !!this.get()?.isPaid; },
 };
 
-// ---- Auth: accounts, sessions, password hashing
+// ---- Auth: when cloudSync.enabled, every method routes to Firebase Auth
+// (with profile data in Firestore). When disabled, we fall back to the
+// original localStorage-based scheme so the app still works offline /
+// before Firebase has been configured.
+
 async function hashPassword(password) {
   const salt = "cardkave-v1";
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + password));
@@ -1064,9 +1078,10 @@ async function hashPassword(password) {
 }
 
 const authStore = {
-  ACCOUNTS_KEY: "cardkave-accounts",
-  SESSION_KEY: "cardkave-session",
+  ACCOUNTS_KEY: "cardkave-accounts",  // legacy localStorage-only mode
+  SESSION_KEY: "cardkave-session",    // legacy localStorage-only mode
 
+  // ─── Local-only helpers (used when cloudSync is not enabled) ────
   accounts() {
     try { return JSON.parse(localStorage.getItem(this.ACCOUNTS_KEY)) || []; }
     catch { return []; }
@@ -1079,13 +1094,34 @@ const authStore = {
   },
   byId(id) { return this.accounts().find(a => a.id === id); },
 
+  // ─── Read API (sync) ─────────────────────────────────────────────
   current() {
+    if (cloudSync.enabled) {
+      const u = cloudSync.currentUser;
+      if (!u) return null;
+      const profile = profileStore.get() || {};
+      const provider = profile.provider
+        || (u.providerData?.[0]?.providerId === "google.com" ? "google" : "email");
+      return {
+        id: u.uid,
+        email: u.email || profile.email || "",
+        displayName: profile.name || u.displayName || (u.email || "").split("@")[0],
+        location: profile.location || "",
+        isPaid: !!profile.isPaid,
+        provider,
+        createdAt: profile.createdAt || (u.metadata?.creationTime ? Date.parse(u.metadata.creationTime) : Date.now()),
+      };
+    }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return null;
     return this.byId(id);
   },
-  isAuthed() { return !!this.current(); },
+  isAuthed() {
+    if (cloudSync.enabled) return !!cloudSync.currentUser;
+    return !!this.current();
+  },
 
+  // ─── Local-mode session helper ───────────────────────────────────
   setSession(id) {
     localStorage.setItem(this.SESSION_KEY, id);
     const acc = this.byId(id);
@@ -1101,10 +1137,19 @@ const authStore = {
   },
 
   signOut() {
+    if (cloudSync.enabled) {
+      // Optimistically clear synchronously so the immediate navigation to
+      // /login (in logout()) sees us as signed out — Firebase's async
+      // onAuthStateChanged will catch up and clear the rest.
+      cloudSync.currentUser = null;
+      cloudSync.currentUid = null;
+      ["user-profile", "collection-cards", "wishlist-cards"].forEach(k => localStorage.removeItem(k));
+      cloudSync.signOut().catch(e => console.warn("[auth] signOut:", e));
+      refreshAuthUI();
+      return;
+    }
     localStorage.removeItem(this.SESSION_KEY);
     localStorage.removeItem("user-profile");
-    // Tell Google not to auto-prompt on the next page load. Best-effort —
-    // safe no-op if the GIS script hasn't loaded.
     try {
       if (typeof google !== "undefined" && google.accounts && google.accounts.id) {
         google.accounts.id.disableAutoSelect();
@@ -1113,7 +1158,21 @@ const authStore = {
     refreshAuthUI();
   },
 
+  // ─── Write API (async) ───────────────────────────────────────────
   async createEmailAccount({ name, email, location, password }) {
+    if (cloudSync.enabled) {
+      try {
+        await cloudSync.signUpWithEmail({
+          name: name.trim(),
+          email: String(email).trim().toLowerCase(),
+          password,
+          location: (location || "").trim(),
+        });
+        return this.current();
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const e = String(email).trim().toLowerCase();
     if (this.findByEmail(e)) {
       throw new Error("An account with that email already exists. Try signing in instead.");
@@ -1136,6 +1195,14 @@ const authStore = {
   },
 
   async signInWithPassword({ email, password }) {
+    if (cloudSync.enabled) {
+      try {
+        await cloudSync.signInWithEmail(String(email).trim().toLowerCase(), password);
+        return this.current();
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const acc = this.findByEmail(email);
     if (!acc) throw new Error("No account found with that email.");
     if (acc.provider !== "email") {
@@ -1147,7 +1214,27 @@ const authStore = {
     return acc;
   },
 
+  async signInWithGoogle({ location } = {}) {
+    if (!cloudSync.enabled) {
+      throw new Error("Cloud sign-in is not configured. See SETUP_FIREBASE.md.");
+    }
+    try {
+      await cloudSync.signInWithGoogle({ location });
+      return this.current();
+    } catch (e) {
+      throw new Error(humanFirebaseError(e));
+    }
+  },
+
+  // Used only in local-only mode by the simulator OAuth flow.
   signInWithProvider({ provider, email, displayName, location }) {
+    if (cloudSync.enabled) {
+      throw new Error(
+        provider === "apple"
+          ? "Apple sign-in isn't wired up to Firebase yet — use Google or email."
+          : "Use authStore.signInWithGoogle() instead when cloud sync is on."
+      );
+    }
     const e = String(email).trim().toLowerCase();
     const arr = this.accounts();
     let acc = arr.find(a => a.email === e);
@@ -1177,6 +1264,25 @@ const authStore = {
   },
 
   updateCurrent(patch) {
+    if (cloudSync.enabled) {
+      const cur = this.current();
+      if (!cur) return null;
+      // Map legacy field name `displayName` → cloud field `name`.
+      const cloudPatch = {};
+      if (patch.displayName != null) cloudPatch.name = patch.displayName;
+      if (patch.location    != null) cloudPatch.location = patch.location;
+      if (patch.isPaid      != null) cloudPatch.isPaid = !!patch.isPaid;
+      cloudSync.updateProfile(cloudPatch).then(() => {
+        // Mirror to profileStore (cloudSync writes localStorage but doesn't
+        // call refreshProfileNav).
+        const merged = { ...(profileStore.get() || {}), ...cloudPatch };
+        profileStore.set(merged);
+      }).catch(e => console.warn("[auth] updateCurrent:", e));
+      // Optimistic local update so the UI doesn't flicker.
+      const merged = { ...(profileStore.get() || {}), ...cloudPatch };
+      profileStore.set(merged);
+      return { ...cur, ...patch };
+    }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return null;
     const arr = this.accounts();
@@ -1193,6 +1299,25 @@ const authStore = {
     return arr[i];
   },
 };
+
+// Translate Firebase Auth error codes into the same human-readable messages
+// the existing UI already shows.
+function humanFirebaseError(e) {
+  const code = e && e.code;
+  switch (code) {
+    case "auth/email-already-in-use":   return "An account with that email already exists. Try signing in instead.";
+    case "auth/invalid-email":          return "Enter a valid email address.";
+    case "auth/weak-password":          return "Password must be at least 6 characters.";
+    case "auth/user-not-found":         return "No account found with that email.";
+    case "auth/wrong-password":         return "Incorrect password. Try again.";
+    case "auth/invalid-credential":     return "Incorrect email or password.";
+    case "auth/popup-closed-by-user":   return "Sign-in cancelled.";
+    case "auth/popup-blocked":          return "Your browser blocked the sign-in popup. Allow popups for this site and try again.";
+    case "auth/network-request-failed": return "Couldn't reach Firebase. Check your connection and try again.";
+    case "auth/operation-not-allowed":  return "This sign-in method isn't enabled in Firebase. See SETUP_FIREBASE.md.";
+    default: return (e && e.message) || "Sign-in failed.";
+  }
+}
 
 function refreshAuthUI() {
   refreshProfileNav();
@@ -1235,7 +1360,7 @@ function isValidEmail(s) {
 
 const postStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); cloudPush("feed-posts", arr); },
   add(p) { const arr = this.list(); arr.unshift(p); this.save(arr); },
   toggleLike(id, name) {
     const arr = this.list();
@@ -1250,7 +1375,7 @@ const postStore = {
 
 const groupStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-groups")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); cloudPush("feed-groups", arr); },
   add(g) { const arr = this.list(); arr.unshift(g); this.save(arr); },
   byId(id) { return this.list().find(g => g.id === id); },
   toggleMember(id, name) {
@@ -1269,7 +1394,7 @@ const groupStore = {
 
 const eventStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-events")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-events", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-events", JSON.stringify(arr)); cloudPush("feed-events", arr); },
   add(e) { const arr = this.list(); arr.unshift(e); this.save(arr); },
   byId(id) { return this.list().find(e => e.id === id); },
   update(id, patch) {
@@ -1341,7 +1466,7 @@ const SEED_USER_LIBRARIES = {
 
 const tradeStore = {
   list() { try { return JSON.parse(localStorage.getItem("trades")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("trades", JSON.stringify(arr)); refreshCounts(); },
+  save(arr) { localStorage.setItem("trades", JSON.stringify(arr)); cloudPush("trades", arr); refreshCounts(); },
   add(t) { const arr = this.list(); arr.unshift(t); this.save(arr); },
   byId(id) { return this.list().find(t => t.id === id); },
   update(id, patch) {
@@ -1370,7 +1495,7 @@ const tradeStore = {
 
 const verifiedTemplateStore = {
   list() { try { return JSON.parse(localStorage.getItem("verified-event-templates")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("verified-event-templates", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("verified-event-templates", JSON.stringify(arr)); cloudPush("verified-event-templates", arr); },
   signature(title, location) {
     return `${title.trim().toLowerCase()}|${location.trim().toLowerCase()}`;
   },
@@ -1475,10 +1600,13 @@ const SEED_POSTS = [
   { authorName: "Maya", content: "Open to local trades — I have a binder of holos from Lost Origin to swap.", minutesAgo: 60 * 24 * 3 },
 ];
 
+// Seed IDs are deterministic so two devices/users seeding the same demo
+// content end up writing to the same Firestore docs (no duplicates after
+// cloud sync converges).
 function seedFeed() {
   if (localStorage.getItem("feed-seeded") === "1") return;
-  const groups = SEED_GROUPS.map(g => ({
-    id: uid("g"),
+  const groups = SEED_GROUPS.map((g, i) => ({
+    id: `seed-g-${i}`,
     name: g.name,
     description: g.description,
     location: g.location,
@@ -1489,10 +1617,10 @@ function seedFeed() {
   groupStore.save(groups);
 
   const userMap = Object.fromEntries(SEED_USERS.map(u => [u.name, u]));
-  const posts = SEED_POSTS.map(p => {
+  const posts = SEED_POSTS.map((p, i) => {
     const u = userMap[p.authorName];
     return {
-      id: uid("p"),
+      id: `seed-p-${i}`,
       authorName: u.name,
       authorLocation: u.location,
       content: p.content,
@@ -1515,9 +1643,11 @@ const SEED_EVENTS = [
 
 function seedEvents() {
   if (localStorage.getItem("events-seeded") === "1") return;
-  const events = SEED_EVENTS.map(e => {
+  const userMap = Object.fromEntries(SEED_USERS.map(u => [u.name, u]));
+  const events = SEED_EVENTS.map((e, i) => {
+    const u = userMap[e.createdBy];
     return {
-      id: uid("e"),
+      id: `seed-e-${i}`,
       title: e.title,
       description: e.description,
       location: e.location,
@@ -1543,8 +1673,10 @@ function seedCommunityIfNeeded() {
     { authorName: "Mira", content: "New to the area! Any good shops near here?", minutesAgo: 30 },
     { authorName: "Jules", content: "League night tomorrow. Bringing my Lost Box list.", minutesAgo: 60 * 4 },
   ];
-  const add = nearby.map(p => ({
-    id: uid("p"),
+  const locSlug = String(me.location || me.name || "anon")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "anon";
+  const add = nearby.map((p, i) => ({
+    id: `community-${locSlug}-${i}`,
     authorName: p.authorName,
     authorLocation: me.location,
     content: p.content,
@@ -1554,7 +1686,10 @@ function seedCommunityIfNeeded() {
     likes: [],
   }));
   const all = postStore.list();
-  postStore.save([...add, ...all]);
+  // Drop any prior community posts with the same IDs so we don't carry
+  // duplicates if a user changes location and the community seed re-runs.
+  const addIds = new Set(add.map(p => p.id));
+  postStore.save([...add, ...all.filter(p => !addIds.has(p.id))]);
   localStorage.setItem("feed-seeded-community", "1");
 }
 
@@ -1645,26 +1780,34 @@ function renderLogin() {
     }
   });
 
-  document.getElementById("login-google").addEventListener("click", () => {
-    runGoogleOAuth().then(profile => {
-      if (!profile) return;
-      try {
+  document.getElementById("login-google").addEventListener("click", async () => {
+    clearError();
+    try {
+      if (cloudSync.enabled) {
+        await authStore.signInWithGoogle();
+      } else {
+        const profile = await runGoogleOAuth();
+        if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile });
-        seedCommunityIfNeeded();
-        location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      }
+      seedCommunityIfNeeded();
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 
-  document.getElementById("login-apple").addEventListener("click", () => {
-    runAppleOAuth().then(profile => {
+  document.getElementById("login-apple").addEventListener("click", async () => {
+    clearError();
+    if (cloudSync.enabled) {
+      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
+      return;
+    }
+    try {
+      const profile = await runAppleOAuth();
       if (!profile) return;
-      try {
-        authStore.signInWithProvider({ provider: "apple", ...profile });
-        seedCommunityIfNeeded();
-        location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      authStore.signInWithProvider({ provider: "apple", ...profile });
+      seedCommunityIfNeeded();
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 }
 
@@ -1726,26 +1869,34 @@ function renderSignup() {
     }
   });
 
-  document.getElementById("signup-google").addEventListener("click", () => {
-    runGoogleOAuth().then(profile => {
-      if (!profile) return;
-      try {
+  document.getElementById("signup-google").addEventListener("click", async () => {
+    clearError();
+    try {
+      if (cloudSync.enabled) {
+        await authStore.signInWithGoogle({ location: locInp.value.trim() });
+      } else {
+        const profile = await runGoogleOAuth();
+        if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile, location: locInp.value.trim() });
-        seedCommunityIfNeeded();
-        location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      }
+      seedCommunityIfNeeded();
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 
-  document.getElementById("signup-apple").addEventListener("click", () => {
-    runAppleOAuth().then(profile => {
+  document.getElementById("signup-apple").addEventListener("click", async () => {
+    clearError();
+    if (cloudSync.enabled) {
+      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
+      return;
+    }
+    try {
+      const profile = await runAppleOAuth();
       if (!profile) return;
-      try {
-        authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
-        seedCommunityIfNeeded();
-        location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
+      seedCommunityIfNeeded();
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 }
 
@@ -3206,7 +3357,7 @@ const DECK_MAX_QTY = 4;
 
 const deckStore = {
   list() { try { return JSON.parse(localStorage.getItem("decks")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("decks", JSON.stringify(arr)); refreshCounts(); },
+  save(arr) { localStorage.setItem("decks", JSON.stringify(arr)); cloudPush("decks", arr); refreshCounts(); },
   add(d) { const arr = this.list(); arr.unshift(d); this.save(arr); },
   byId(id) { return this.list().find(d => d.id === id); },
   update(id, patch) {
@@ -3712,7 +3863,13 @@ function route() {
 }
 
 window.addEventListener("hashchange", route);
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
+  // If cloud sync is on, wait for the first auth state to resolve so we
+  // don't bounce a logged-in user to /login while Firebase loads their
+  // persisted session from IndexedDB.
+  if (window.cloudSync && cloudSync.enabled) {
+    try { await cloudSync.ready; } catch {}
+  }
   seedFeed();
   seedEvents();
   seedCommunityIfNeeded();
@@ -3721,6 +3878,15 @@ window.addEventListener("DOMContentLoaded", () => {
   paintLastUpdated();
   const out = document.getElementById("nav-signout");
   if (out) out.addEventListener("click", () => logout());
+  route();
+});
+
+// React to remote changes pushed in by cloud-sync.js — re-render the
+// current view so other devices' edits show up live.
+window.addEventListener("cloudsync:change", () => {
+  refreshCounts();
+  refreshAuthUI();
+  // Re-route to redraw whatever's on screen with the freshest data.
   route();
 });
 

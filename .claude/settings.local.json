@@ -114,7 +114,10 @@
       "Bash(curl -sS https://api.tcgdex.net/v2/ja/sets/__TRACKED_VAR__ --max-time 6)",
       "Bash(curl -sI 'https://assets.tcgdex.net/ja/SV/SVLN/001/low.png' --max-time 4)",
       "Bash(curl -sI 'https://assets.tcgdex.net/ja/SV/SV4a/001/low.png' --max-time 4)",
-      "Bash(grep -n \"JP_CARD_SUFFIXES\\\\|translateJpCardName\\\\|compactJpCard\\\\|renderJapaneseSet\\\\|^// ---- Japanese set detail\\\\|^// ---- Detail$\" /Users/shivankahuja/Desktop/CardKave/app.js)"
+      "Bash(grep -n \"JP_CARD_SUFFIXES\\\\|translateJpCardName\\\\|compactJpCard\\\\|renderJapaneseSet\\\\|^// ---- Japanese set detail\\\\|^// ---- Detail$\" /Users/shivankahuja/Desktop/CardKave/app.js)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d status)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d checkout -- .claude/launch.json)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d add app.js index.html .claude/settings.local.json SETUP_FIREBASE.md cloud-sync.js firebase-config.js firestore.rules)"
     ]
   }
 }
