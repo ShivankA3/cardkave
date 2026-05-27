@@ -73,7 +73,7 @@ const TOTAL = 1025;
 
 const store = {
   get(key) { try { return JSON.parse(localStorage.getItem(key)) || []; } catch { return []; } },
-  set(key, v) { localStorage.setItem(key, JSON.stringify(v)); refreshCounts(); },
+  set(key, v) { localStorage.setItem(key, JSON.stringify(v)); cloudPush(key, v); refreshCounts(); },
   toggle(key, id) {
     const list = store.get(key);
     const i = list.indexOf(id);
@@ -83,6 +83,13 @@ const store = {
   },
   has(key, id) { return store.get(key).includes(id); },
 };
+
+// Mirror a store write to Firestore via cloudSync, if cloud is enabled +
+// the user is signed in. Safe to call before cloud-sync.js loads (the
+// stub no-ops in local-only mode).
+function cloudPush(key, value) {
+  try { if (window.cloudSync && cloudSync.push) cloudSync.push(key, value); } catch {}
+}
 
 function snapshotCard(c) {
   return {
@@ -122,6 +129,7 @@ function makeCardStore(key) {
         list.unshift({ ...snapshotCard(card), quantity: 1 });
       }
       localStorage.setItem(key, JSON.stringify(list));
+      cloudPush(key, list);
       refreshCounts();
       return list[i >= 0 ? i : 0].quantity;
     },
@@ -134,6 +142,7 @@ function makeCardStore(key) {
       if (newQty <= 0) list.splice(i, 1);
       else list[i] = { ...list[i], quantity: newQty };
       localStorage.setItem(key, JSON.stringify(list));
+      cloudPush(key, list);
       refreshCounts();
       return Math.max(0, newQty);
     },
@@ -1068,10 +1077,15 @@ const renderCardWishlist = () => renderCardList(
 // ---- Feed: profile, posts, groups
 const profileStore = {
   get() { try { return JSON.parse(localStorage.getItem("user-profile")); } catch { return null; } },
-  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); refreshProfileNav(); },
+  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); cloudPush("user-profile", p); refreshProfileNav(); },
+  isPaid() { return !!this.get()?.isPaid; },
 };
 
-// ---- Auth: accounts, sessions, password hashing
+// ---- Auth: when cloudSync.enabled, every method routes to Firebase Auth
+// (with profile data in Firestore). When disabled, we fall back to the
+// original localStorage-based scheme so the app still works offline /
+// before Firebase has been configured.
+
 async function hashPassword(password) {
   const salt = "cardkave-v1";
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + password));
@@ -1079,9 +1093,10 @@ async function hashPassword(password) {
 }
 
 const authStore = {
-  ACCOUNTS_KEY: "cardkave-accounts",
-  SESSION_KEY: "cardkave-session",
+  ACCOUNTS_KEY: "cardkave-accounts",  // legacy localStorage-only mode
+  SESSION_KEY: "cardkave-session",    // legacy localStorage-only mode
 
+  // ─── Local-only helpers (used when cloudSync is not enabled) ────
   accounts() {
     try { return JSON.parse(localStorage.getItem(this.ACCOUNTS_KEY)) || []; }
     catch { return []; }
@@ -1094,13 +1109,34 @@ const authStore = {
   },
   byId(id) { return this.accounts().find(a => a.id === id); },
 
+  // ─── Read API (sync) ─────────────────────────────────────────────
   current() {
+    if (cloudSync.enabled) {
+      const u = cloudSync.currentUser;
+      if (!u) return null;
+      const profile = profileStore.get() || {};
+      const provider = profile.provider
+        || (u.providerData?.[0]?.providerId === "google.com" ? "google" : "email");
+      return {
+        id: u.uid,
+        email: u.email || profile.email || "",
+        displayName: profile.name || u.displayName || (u.email || "").split("@")[0],
+        location: profile.location || "",
+        isPaid: !!profile.isPaid,
+        provider,
+        createdAt: profile.createdAt || (u.metadata?.creationTime ? Date.parse(u.metadata.creationTime) : Date.now()),
+      };
+    }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return null;
     return this.byId(id);
   },
-  isAuthed() { return !!this.current(); },
+  isAuthed() {
+    if (cloudSync.enabled) return !!cloudSync.currentUser;
+    return !!this.current();
+  },
 
+  // ─── Local-mode session helper ───────────────────────────────────
   setSession(id) {
     localStorage.setItem(this.SESSION_KEY, id);
     const acc = this.byId(id);
@@ -1120,10 +1156,19 @@ const authStore = {
   },
 
   signOut() {
+    if (cloudSync.enabled) {
+      // Optimistically clear synchronously so the immediate navigation to
+      // /login (in logout()) sees us as signed out — Firebase's async
+      // onAuthStateChanged will catch up and clear the rest.
+      cloudSync.currentUser = null;
+      cloudSync.currentUid = null;
+      ["user-profile", "collection-cards", "wishlist-cards"].forEach(k => localStorage.removeItem(k));
+      cloudSync.signOut().catch(e => console.warn("[auth] signOut:", e));
+      refreshAuthUI();
+      return;
+    }
     localStorage.removeItem(this.SESSION_KEY);
     localStorage.removeItem("user-profile");
-    // Tell Google not to auto-prompt on the next page load. Best-effort —
-    // safe no-op if the GIS script hasn't loaded.
     try {
       if (typeof google !== "undefined" && google.accounts && google.accounts.id) {
         google.accounts.id.disableAutoSelect();
@@ -1132,7 +1177,21 @@ const authStore = {
     refreshAuthUI();
   },
 
+  // ─── Write API (async) ───────────────────────────────────────────
   async createEmailAccount({ name, email, location, password }) {
+    if (cloudSync.enabled) {
+      try {
+        await cloudSync.signUpWithEmail({
+          name: name.trim(),
+          email: String(email).trim().toLowerCase(),
+          password,
+          location: (location || "").trim(),
+        });
+        return this.current();
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const e = String(email).trim().toLowerCase();
     if (this.findByEmail(e)) {
       throw new Error("An account with that email already exists. Try signing in instead.");
@@ -1155,6 +1214,14 @@ const authStore = {
   },
 
   async signInWithPassword({ email, password }) {
+    if (cloudSync.enabled) {
+      try {
+        await cloudSync.signInWithEmail(String(email).trim().toLowerCase(), password);
+        return this.current();
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const acc = this.findByEmail(email);
     if (!acc) throw new Error("No account found with that email.");
     if (acc.provider !== "email") {
@@ -1166,7 +1233,27 @@ const authStore = {
     return acc;
   },
 
+  async signInWithGoogle({ location } = {}) {
+    if (!cloudSync.enabled) {
+      throw new Error("Cloud sign-in is not configured. See SETUP_FIREBASE.md.");
+    }
+    try {
+      await cloudSync.signInWithGoogle({ location });
+      return this.current();
+    } catch (e) {
+      throw new Error(humanFirebaseError(e));
+    }
+  },
+
+  // Used only in local-only mode by the simulator OAuth flow.
   signInWithProvider({ provider, email, displayName, location }) {
+    if (cloudSync.enabled) {
+      throw new Error(
+        provider === "apple"
+          ? "Apple sign-in isn't wired up to Firebase yet — use Google or email."
+          : "Use authStore.signInWithGoogle() instead when cloud sync is on."
+      );
+    }
     const e = String(email).trim().toLowerCase();
     const arr = this.accounts();
     let acc = arr.find(a => a.email === e);
@@ -1196,6 +1283,30 @@ const authStore = {
   },
 
   updateCurrent(patch) {
+    if (cloudSync.enabled) {
+      const cur = this.current();
+      if (!cur) return null;
+      // Map legacy field name `displayName` → cloud field `name`. Forward any
+      // profile customization fields (bio, favoriteType, avatarColor, initials,
+      // email) directly. Skip passwordHash — in cloud mode Firebase Auth owns
+      // the password and the field is meaningless.
+      const cloudPatch = {};
+      if (patch.displayName  != null) cloudPatch.name         = patch.displayName;
+      if (patch.location     != null) cloudPatch.location     = patch.location;
+      if (patch.isPaid       != null) cloudPatch.isPaid       = !!patch.isPaid;
+      if (patch.bio          != null) cloudPatch.bio          = patch.bio;
+      if (patch.favoriteType != null) cloudPatch.favoriteType = patch.favoriteType;
+      if (patch.avatarColor  != null) cloudPatch.avatarColor  = patch.avatarColor;
+      if (patch.initials     != null) cloudPatch.initials     = patch.initials;
+      if (patch.email        != null) cloudPatch.email        = patch.email;
+      cloudSync.updateProfile(cloudPatch).then(() => {
+        const merged = { ...(profileStore.get() || {}), ...cloudPatch };
+        profileStore.set(merged);
+      }).catch(e => console.warn("[auth] updateCurrent:", e));
+      const merged = { ...(profileStore.get() || {}), ...cloudPatch };
+      profileStore.set(merged);
+      return { ...cur, ...patch };
+    }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return null;
     const arr = this.accounts();
@@ -1222,33 +1333,84 @@ const authStore = {
     if (acc.provider !== "email") {
       throw new Error(`This account signs in with ${acc.provider === "google" ? "Google" : "Apple"} — manage the password there.`);
     }
+    if (newPassword.length < 6) throw new Error("New password must be at least 6 characters.");
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) throw new Error("You're not signed in.");
+      try {
+        const cred = firebase.auth.EmailAuthProvider.credential(user.email, currentPassword);
+        await user.reauthenticateWithCredential(cred);
+        await user.updatePassword(newPassword);
+        return true;
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const candidate = await hashPassword(currentPassword);
     if (candidate !== acc.passwordHash) throw new Error("Current password is incorrect.");
-    if (newPassword.length < 6) throw new Error("New password must be at least 6 characters.");
     const newHash = await hashPassword(newPassword);
     this.updateCurrent({ passwordHash: newHash, passwordChangedAt: Date.now() });
     return true;
   },
 
+  // Local-mode only — cloud mode goes through sendPasswordResetEmail.
   async setPasswordViaReset(newPassword) {
+    if (cloudSync.enabled) {
+      throw new Error("In cloud mode, reset your password via the link Firebase sent to your inbox.");
+    }
     if (newPassword.length < 6) throw new Error("Password must be at least 6 characters.");
     const newHash = await hashPassword(newPassword);
     this.updateCurrent({ passwordHash: newHash, passwordChangedAt: Date.now() });
     return true;
   },
 
-  changeEmail(newEmail) {
+  // Trigger Firebase's built-in password reset email. Cloud-only.
+  async sendCloudPasswordReset() {
+    if (!cloudSync.enabled) throw new Error("Cloud sign-in is not configured.");
+    const acc = this.current();
+    if (!acc) throw new Error("You're not signed in.");
+    try {
+      await window.fbAuth.sendPasswordResetEmail(acc.email);
+      return true;
+    } catch (e) {
+      throw new Error(humanFirebaseError(e));
+    }
+  },
+
+  async changeEmail(newEmail) {
     const acc = this.current();
     if (!acc) throw new Error("You're not signed in.");
     const e = String(newEmail).trim().toLowerCase();
     if (!isValidEmail(e)) throw new Error("Enter a valid email address.");
     if (e === acc.email) throw new Error("That's already your email.");
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) throw new Error("You're not signed in.");
+      try {
+        // Firebase sends a verification link to the new address; the email
+        // only switches once the user clicks it.
+        await user.verifyBeforeUpdateEmail(e);
+        return { pendingVerification: true };
+      } catch (err) {
+        throw new Error(humanFirebaseError(err));
+      }
+    }
     if (this.findByEmail(e)) throw new Error("Another account already uses that email.");
     this.updateCurrent({ email: e, emailChangedAt: Date.now() });
-    return true;
+    return { pendingVerification: false };
   },
 
-  deleteCurrent() {
+  async deleteCurrent() {
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) return false;
+      try {
+        await user.delete();
+        return true;
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return false;
     const arr = this.accounts().filter(a => a.id !== id);
@@ -1257,6 +1419,25 @@ const authStore = {
     return true;
   },
 };
+
+// Translate Firebase Auth error codes into the same human-readable messages
+// the existing UI already shows.
+function humanFirebaseError(e) {
+  const code = e && e.code;
+  switch (code) {
+    case "auth/email-already-in-use":   return "An account with that email already exists. Try signing in instead.";
+    case "auth/invalid-email":          return "Enter a valid email address.";
+    case "auth/weak-password":          return "Password must be at least 6 characters.";
+    case "auth/user-not-found":         return "No account found with that email.";
+    case "auth/wrong-password":         return "Incorrect password. Try again.";
+    case "auth/invalid-credential":     return "Incorrect email or password.";
+    case "auth/popup-closed-by-user":   return "Sign-in cancelled.";
+    case "auth/popup-blocked":          return "Your browser blocked the sign-in popup. Allow popups for this site and try again.";
+    case "auth/network-request-failed": return "Couldn't reach Firebase. Check your connection and try again.";
+    case "auth/operation-not-allowed":  return "This sign-in method isn't enabled in Firebase. See SETUP_FIREBASE.md.";
+    default: return (e && e.message) || "Sign-in failed.";
+  }
+}
 
 function refreshAuthUI() {
   refreshProfileNav();
@@ -1299,7 +1480,7 @@ function isValidEmail(s) {
 
 const postStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); cloudPush("feed-posts", arr); },
   add(p) { const arr = this.list(); arr.unshift(p); this.save(arr); },
   toggleLike(id, name) {
     const arr = this.list();
@@ -1314,7 +1495,7 @@ const postStore = {
 
 const groupStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-groups")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); cloudPush("feed-groups", arr); },
   add(g) { const arr = this.list(); arr.unshift(g); this.save(arr); },
   byId(id) { return this.list().find(g => g.id === id); },
   toggleMember(id, name) {
@@ -1333,7 +1514,7 @@ const groupStore = {
 
 const eventStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-events")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("feed-events", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("feed-events", JSON.stringify(arr)); cloudPush("feed-events", arr); },
   add(e) { const arr = this.list(); arr.unshift(e); this.save(arr); },
   byId(id) { return this.list().find(e => e.id === id); },
   update(id, patch) {
@@ -1397,7 +1578,7 @@ const TRADE_CATALOG = Object.fromEntries(TRADE_CATALOG_LIST.map(c => [c.id, c]))
 
 const tradeStore = {
   list() { try { return JSON.parse(localStorage.getItem("trades")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("trades", JSON.stringify(arr)); refreshCounts(); },
+  save(arr) { localStorage.setItem("trades", JSON.stringify(arr)); cloudPush("trades", arr); refreshCounts(); },
   add(t) { const arr = this.list(); arr.unshift(t); this.save(arr); },
   byId(id) { return this.list().find(t => t.id === id); },
   update(id, patch) {
@@ -1426,7 +1607,7 @@ const tradeStore = {
 
 const verifiedTemplateStore = {
   list() { try { return JSON.parse(localStorage.getItem("verified-event-templates")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("verified-event-templates", JSON.stringify(arr)); },
+  save(arr) { localStorage.setItem("verified-event-templates", JSON.stringify(arr)); cloudPush("verified-event-templates", arr); },
   signature(title, location) {
     return `${title.trim().toLowerCase()}|${location.trim().toLowerCase()}`;
   },
@@ -1658,22 +1839,37 @@ function renderProfile() {
     emailMsg.classList.add("hidden");
   }
 
-  document.getElementById("email-form").addEventListener("submit", e => {
+  document.getElementById("email-form").addEventListener("submit", async e => {
     e.preventDefault();
     clearEmailMsg();
     const next = newEmailInp.value.trim();
     if (!isValidEmail(next)) return showEmailMsg("Enter a valid email address.");
     const a = authStore.current();
     if (a && next.toLowerCase() === a.email) return showEmailMsg("That's already your email.");
+
+    // Cloud mode: let Firebase send a real verification link to the new
+    // address. The email only switches after the user clicks the link.
+    if (cloudSync.enabled) {
+      try {
+        await authStore.changeEmail(next);
+        newEmailInp.value = "";
+        showFlash(`Verification email sent to ${next}. Click the link to switch your email.`);
+      } catch (err) {
+        showEmailMsg(err.message || "Couldn't send verification email.");
+      }
+      return;
+    }
+
+    // Local mode: send a 6-digit code via EmailJS, verify, then switch.
     if (authStore.findByEmail(next)) return showEmailMsg("Another account already uses that email.");
     openCodeModal({
       title: "Confirm your new email",
       intro: `We're sending a 6-digit code to ${next}.`,
       email: next,
       purpose: "email change",
-      onVerified: () => {
+      onVerified: async () => {
         try {
-          authStore.changeEmail(next);
+          await authStore.changeEmail(next);
           newEmailInp.value = "";
           emailInp.value = next;
           paintHeader();
@@ -1730,8 +1926,19 @@ function renderProfile() {
     }
   });
 
-  resetLinkBtn.addEventListener("click", () => {
+  resetLinkBtn.addEventListener("click", async () => {
     if (acc.provider !== "email") return;
+    if (cloudSync.enabled) {
+      // Firebase sends a real reset link; the user clicks it to choose a new
+      // password on Firebase's hosted page.
+      try {
+        await authStore.sendCloudPasswordReset();
+        showFlash(`Reset link sent to ${acc.email}. Check your inbox.`);
+      } catch (err) {
+        showFlash(err.message || "Couldn't send reset link.", "error");
+      }
+      return;
+    }
     openCodeModal({
       title: "Reset your password",
       intro: `We're sending a 6-digit code to ${acc.email}.`,
@@ -1749,10 +1956,15 @@ function renderProfile() {
 
   // ---- Account
   document.getElementById("profile-signout").addEventListener("click", () => logout());
-  document.getElementById("profile-delete").addEventListener("click", () => {
+  document.getElementById("profile-delete").addEventListener("click", async () => {
     if (!window.confirm("Delete your CardKave account? This signs you out and removes your login. Local card data stays in this browser.")) return;
-    authStore.deleteCurrent();
-    window.location.hash = "#/login";
+    try {
+      await authStore.deleteCurrent();
+      window.location.hash = "#/login";
+    } catch (err) {
+      // Firebase requires recent reauth for deletion — surface that clearly.
+      showFlash(err.message || "Couldn't delete account.", "error");
+    }
   });
 
   paintHeader();
@@ -1931,24 +2143,32 @@ function renderLogin() {
     }
   });
 
-  document.getElementById("login-google").addEventListener("click", () => {
-    runGoogleOAuth().then(profile => {
-      if (!profile) return;
-      try {
+  document.getElementById("login-google").addEventListener("click", async () => {
+    clearError();
+    try {
+      if (cloudSync.enabled) {
+        await authStore.signInWithGoogle();
+      } else {
+        const profile = await runGoogleOAuth();
+        if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile });
-          location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      }
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 
-  document.getElementById("login-apple").addEventListener("click", () => {
-    runAppleOAuth().then(profile => {
+  document.getElementById("login-apple").addEventListener("click", async () => {
+    clearError();
+    if (cloudSync.enabled) {
+      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
+      return;
+    }
+    try {
+      const profile = await runAppleOAuth();
       if (!profile) return;
-      try {
-        authStore.signInWithProvider({ provider: "apple", ...profile });
-          location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      authStore.signInWithProvider({ provider: "apple", ...profile });
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 }
 
@@ -2009,24 +2229,32 @@ function renderSignup() {
     }
   });
 
-  document.getElementById("signup-google").addEventListener("click", () => {
-    runGoogleOAuth().then(profile => {
-      if (!profile) return;
-      try {
+  document.getElementById("signup-google").addEventListener("click", async () => {
+    clearError();
+    try {
+      if (cloudSync.enabled) {
+        await authStore.signInWithGoogle({ location: locInp.value.trim() });
+      } else {
+        const profile = await runGoogleOAuth();
+        if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile, location: locInp.value.trim() });
-          location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      }
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 
-  document.getElementById("signup-apple").addEventListener("click", () => {
-    runAppleOAuth().then(profile => {
+  document.getElementById("signup-apple").addEventListener("click", async () => {
+    clearError();
+    if (cloudSync.enabled) {
+      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
+      return;
+    }
+    try {
+      const profile = await runAppleOAuth();
       if (!profile) return;
-      try {
-        authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
-          location.hash = "#/browse";
-      } catch (err) { showError(err.message); }
-    });
+      authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
+      location.hash = "#/browse";
+    } catch (err) { showError(err.message); }
   });
 }
 
@@ -3439,7 +3667,7 @@ const DECK_MAX_QTY = 4;
 
 const deckStore = {
   list() { try { return JSON.parse(localStorage.getItem("decks")) || []; } catch { return []; } },
-  save(arr) { localStorage.setItem("decks", JSON.stringify(arr)); refreshCounts(); },
+  save(arr) { localStorage.setItem("decks", JSON.stringify(arr)); cloudPush("decks", arr); refreshCounts(); },
   add(d) { const arr = this.list(); arr.unshift(d); this.save(arr); },
   byId(id) { return this.list().find(d => d.id === id); },
   update(id, patch) {
@@ -3945,9 +4173,15 @@ function route() {
 }
 
 window.addEventListener("hashchange", route);
-window.addEventListener("DOMContentLoaded", () => {
-  clearLegacySeedData();
+window.addEventListener("DOMContentLoaded", async () => {
   initEmailService();
+  // If cloud sync is on, wait for the first auth state to resolve so we
+  // don't bounce a logged-in user to /login while Firebase loads their
+  // persisted session from IndexedDB.
+  if (window.cloudSync && cloudSync.enabled) {
+    try { await cloudSync.ready; } catch {}
+  }
+  pruneLegacySeedContent();
   refreshCounts();
   refreshAuthUI();
   paintLastUpdated();
@@ -3956,29 +4190,41 @@ window.addEventListener("DOMContentLoaded", () => {
   route();
 });
 
-function clearLegacySeedData() {
-  if (localStorage.getItem("seed-data-cleared") === "1") return;
+// React to remote changes pushed in by cloud-sync.js — re-render the
+// current view so other devices' edits show up live. Also re-prune any
+// seed content that another device might have re-uploaded.
+window.addEventListener("cloudsync:change", () => {
+  pruneLegacySeedContent();
+  refreshCounts();
+  refreshAuthUI();
+  route();
+});
+
+// Remove any legacy seed posts/groups/events that earlier app versions wrote
+// to localStorage or Firestore. Idempotent — safe to call on every cloud
+// change. Saves only when something actually needs to be removed, so the
+// cloud-sync diff push is a no-op when nothing has changed.
+function pruneLegacySeedContent() {
   ["feed-seeded", "feed-seeded-community", "events-seeded"].forEach(k => localStorage.removeItem(k));
-  const groups = (() => { try { return JSON.parse(localStorage.getItem("feed-groups")) || []; } catch { return []; } })();
-  const seededGroupNames = new Set([
-    "Brooklyn TCG League", "Vintage Pulls", "Tokyo Collectors", "Berlin Trade Circle",
-  ]);
-  const filteredGroups = groups.filter(g => !seededGroupNames.has(g.name));
-  localStorage.setItem("feed-groups", JSON.stringify(filteredGroups));
+  const seedAuthors = new Set(["Maya", "Hiro", "Lena", "Diego", "Sven", "Mira", "Jules"]);
+  const seedGroupNames = new Set(["Brooklyn TCG League", "Vintage Pulls", "Tokyo Collectors", "Berlin Trade Circle"]);
+  const seedEventTitles = new Set(["Brooklyn TCG Trade Night", "Vintage Pulls Showcase", "Akihabara Card Shop Crawl"]);
 
-  const posts = (() => { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } })();
-  const seededAuthors = new Set(["Maya", "Hiro", "Lena", "Diego", "Sven", "Mira", "Jules"]);
-  const filteredPosts = posts.filter(p => !seededAuthors.has(p.authorName));
-  localStorage.setItem("feed-posts", JSON.stringify(filteredPosts));
+  const posts = postStore.list();
+  const cleanPosts = posts.filter(p => {
+    if (seedAuthors.has(p.authorName)) return false;
+    const id = String(p.id || "");
+    return !(id.startsWith("seed-p-") || id.startsWith("community-"));
+  });
+  if (cleanPosts.length !== posts.length) postStore.save(cleanPosts);
 
-  const events = (() => { try { return JSON.parse(localStorage.getItem("feed-events")) || []; } catch { return []; } })();
-  const seededEventTitles = new Set([
-    "Brooklyn TCG Trade Night", "Vintage Pulls Showcase", "Akihabara Card Shop Crawl",
-  ]);
-  const filteredEvents = events.filter(e => !seededEventTitles.has(e.title));
-  localStorage.setItem("feed-events", JSON.stringify(filteredEvents));
+  const groups = groupStore.list();
+  const cleanGroups = groups.filter(g => !seedGroupNames.has(g.name) && !String(g.id || "").startsWith("seed-g-"));
+  if (cleanGroups.length !== groups.length) groupStore.save(cleanGroups);
 
-  localStorage.setItem("seed-data-cleared", "1");
+  const events = eventStore.list();
+  const cleanEvents = events.filter(e => !seedEventTitles.has(e.title) && !String(e.id || "").startsWith("seed-e-"));
+  if (cleanEvents.length !== events.length) eventStore.save(cleanEvents);
 }
 
 function paintLastUpdated() {

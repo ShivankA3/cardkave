@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// CardKave Firestore security rules.
+//
+// v1 trade-offs (intentionally permissive — see SETUP_FIREBASE.md):
+//   - Per-user data is locked tight: only the owning user can read or write.
+//   - Shared collections (posts, groups, events, trades, decks, templates):
+//     any signed-in user can read AND write any document. This matches the
+//     current app's behavior (likes, joins, attendance, trade replies all
+//     mutate other users' docs). Tightening to per-field rules is left as
+//     future work — for that you'd lock everything except specific array
+//     fields like `likes`, `members`, `attendees`, `messages`.
+//
+// All paths require authentication. Unauthenticated requests are rejected.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Per-user profile + per-user data subcollections ─────────────
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      match /data/{doc} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // ── Shared collections ──────────────────────────────────────────
+    // Any signed-in user can read every doc and write any doc.
+    // The app stamps `authorUid` on new items so future field-level rules
+    // can authorize edits more strictly.
+
+    match /posts/{postId}                    { allow read, write: if request.auth != null; }
+    match /groups/{groupId}                  { allow read, write: if request.auth != null; }
+    match /events/{eventId}                  { allow read, write: if request.auth != null; }
+    match /trades/{tradeId}                  { allow read, write: if request.auth != null; }
+    match /decks/{deckId}                    { allow read, write: if request.auth != null; }
+    match /verifiedEventTemplates/{tplId}    { allow read, write: if request.auth != null; }
+  }
+}
