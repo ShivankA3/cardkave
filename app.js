@@ -29,6 +29,29 @@ const OAUTH_CONFIG = {
   },
 };
 
+// ---- EmailJS configuration ----
+// Real verification emails (email change, password reset) are sent via EmailJS
+// directly from the browser — no backend required.
+//
+// Set up:
+//   1. Sign up at https://www.emailjs.com (free tier: 200 emails/month)
+//   2. Add an Email Service (Gmail, Outlook, custom SMTP, etc.) and copy its Service ID
+//   3. Create an Email Template with three variables: {{to_email}}, {{code}}, {{purpose}}
+//      Suggested template:
+//        Subject: Your CardKave {{purpose}} code
+//        Body:    Your CardKave {{purpose}} code is {{code}}.
+//                 It expires in 15 minutes. If you didn't request this, ignore this email.
+//      Set "To Email" in the template settings to: {{to_email}}
+//   4. Copy your Public Key from Account → API Keys
+//   5. Paste all three values below.
+//
+// Until configured, the verify-code modal shows a clear error instead of sending.
+const EMAIL_CONFIG = {
+  publicKey: "",  // e.g. "AbCdEfGhIjKlMnOpQ"
+  serviceId: "", // e.g. "service_xxxxxxx"
+  templateId: "", // e.g. "template_xxxxxxx"
+};
+
 // Sync the auth-mode body class immediately so the topbar doesn't flash on
 // auth pages before route() runs.
 (function preroute() {
@@ -364,25 +387,31 @@ function makeSetCard(s) {
   return el;
 }
 
-// ---- Recently searched cards
-const recentCards = {
-  KEY: "recently-searched-cards",
+// ---- Recently searched queries
+// Stores the actual search terms the user typed and submitted, like Google's
+// search history. Clicking one re-runs that search; we don't track cards
+// they opened from results.
+const recentQueries = {
+  KEY: "recently-searched-queries",
   MAX: 5,
   list() {
     try {
       const arr = JSON.parse(localStorage.getItem(this.KEY)) || [];
-      return arr.slice(0, this.MAX);
+      // Tolerate the old shape (array of card snapshots) — just drop those.
+      return arr.filter(q => typeof q === "string").slice(0, this.MAX);
     } catch { return []; }
   },
-  add(card) {
-    const snap = snapshotCard(card);
-    const list = this.list().filter(c => c.id !== snap.id);
-    list.unshift(snap);
+  add(query) {
+    const q = String(query || "").trim();
+    if (!q) return;
+    const lower = q.toLowerCase();
+    const list = this.list().filter(existing => existing.toLowerCase() !== lower);
+    list.unshift(q);
     if (list.length > this.MAX) list.length = this.MAX;
     try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
   },
-  remove(id) {
-    const list = this.list().filter(c => c.id !== id);
+  remove(query) {
+    const list = this.list().filter(existing => existing !== query);
     try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch {}
   },
   clear() {
@@ -507,67 +536,49 @@ async function renderBrowse() {
 
     let searchToken = 0;
 
-    const onCardOpen = (c) => {
-      recentCards.add(c);
-      paintRecent();
-      openCardModal(c);
-    };
+    const onCardOpen = (c) => openCardModal(c);
 
-    function makeRecentItem(c) {
+    function makeRecentItem(query) {
       const row = document.createElement("div");
       row.className = "recent-item-row";
 
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "recent-item";
-      btn.setAttribute("aria-label", `Open ${c.name}`);
+      btn.setAttribute("aria-label", `Search ${query}`);
 
       const icon = document.createElement("span");
       icon.className = "recent-item-icon";
       icon.setAttribute("aria-hidden", "true");
       icon.innerHTML = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-      const thumb = document.createElement("span");
-      thumb.className = "recent-item-thumb";
-      if (c.images?.small) {
-        const img = document.createElement("img");
-        img.src = c.images.small;
-        img.alt = "";
-        img.loading = "lazy";
-        thumb.appendChild(img);
-      }
-
       const text = document.createElement("span");
       text.className = "recent-item-text";
       const nameEl = document.createElement("span");
       nameEl.className = "recent-item-name";
-      nameEl.textContent = c.name || "Unknown";
-      const setEl = document.createElement("span");
-      setEl.className = "recent-item-set";
-      setEl.textContent = c.set?.name || "";
+      nameEl.textContent = query;
       text.appendChild(nameEl);
-      text.appendChild(setEl);
 
       btn.appendChild(icon);
-      btn.appendChild(thumb);
       btn.appendChild(text);
 
       // mousedown would blur the input before click fires; suppress it.
       btn.addEventListener("mousedown", e => e.preventDefault());
       btn.addEventListener("click", () => {
         closeDropdown();
-        onCardOpen(c);
+        search.value = query;
+        performSearch(query);
       });
 
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "recent-item-remove";
-      remove.setAttribute("aria-label", `Remove ${c.name} from recent searches`);
+      remove.setAttribute("aria-label", `Remove ${query} from recent searches`);
       remove.textContent = "×";
       remove.addEventListener("mousedown", e => e.preventDefault());
       remove.addEventListener("click", e => {
         e.stopPropagation();
-        recentCards.remove(c.id);
+        recentQueries.remove(query);
         paintRecent();
       });
 
@@ -577,20 +588,20 @@ async function renderBrowse() {
     }
 
     function paintRecent() {
-      const recents = recentCards.list();
+      const recents = recentQueries.list();
       recentList.innerHTML = "";
       if (!recents.length) {
         dropdown.classList.add("hidden");
         return;
       }
       const frag = document.createDocumentFragment();
-      recents.forEach(c => frag.appendChild(makeRecentItem(c)));
+      recents.forEach(q => frag.appendChild(makeRecentItem(q)));
       recentList.appendChild(frag);
     }
 
     function openDropdown() {
       paintRecent();
-      if (!recentCards.list().length) return;
+      if (!recentQueries.list().length) return;
       dropdown.classList.remove("hidden");
     }
     function closeDropdown() {
@@ -618,7 +629,7 @@ async function renderBrowse() {
 
     clearBtn.addEventListener("mousedown", e => e.preventDefault());
     clearBtn.addEventListener("click", () => {
-      recentCards.clear();
+      recentQueries.clear();
       paintRecent();
       closeDropdown();
     });
@@ -643,6 +654,10 @@ async function renderBrowse() {
         setStatus("Keep typing…", true);
         return;
       }
+
+      // Persist the query the user actually submitted (regardless of result
+      // count) so it shows up in the recents dropdown next time.
+      recentQueries.add(trimmed);
 
       setStatus("Searching…", true);
 
@@ -1131,6 +1146,10 @@ const authStore = {
         location: acc.location || "",
         email: acc.email,
         provider: acc.provider,
+        bio: acc.bio || "",
+        favoriteType: acc.favoriteType || "",
+        avatarColor: acc.avatarColor || "",
+        initials: acc.initials || "",
       });
     }
     refreshAuthUI();
@@ -1267,18 +1286,23 @@ const authStore = {
     if (cloudSync.enabled) {
       const cur = this.current();
       if (!cur) return null;
-      // Map legacy field name `displayName` → cloud field `name`.
+      // Map legacy field name `displayName` → cloud field `name`. Forward any
+      // profile customization fields (bio, favoriteType, avatarColor, initials,
+      // email) directly. Skip passwordHash — in cloud mode Firebase Auth owns
+      // the password and the field is meaningless.
       const cloudPatch = {};
-      if (patch.displayName != null) cloudPatch.name = patch.displayName;
-      if (patch.location    != null) cloudPatch.location = patch.location;
-      if (patch.isPaid      != null) cloudPatch.isPaid = !!patch.isPaid;
+      if (patch.displayName  != null) cloudPatch.name         = patch.displayName;
+      if (patch.location     != null) cloudPatch.location     = patch.location;
+      if (patch.isPaid       != null) cloudPatch.isPaid       = !!patch.isPaid;
+      if (patch.bio          != null) cloudPatch.bio          = patch.bio;
+      if (patch.favoriteType != null) cloudPatch.favoriteType = patch.favoriteType;
+      if (patch.avatarColor  != null) cloudPatch.avatarColor  = patch.avatarColor;
+      if (patch.initials     != null) cloudPatch.initials     = patch.initials;
+      if (patch.email        != null) cloudPatch.email        = patch.email;
       cloudSync.updateProfile(cloudPatch).then(() => {
-        // Mirror to profileStore (cloudSync writes localStorage but doesn't
-        // call refreshProfileNav).
         const merged = { ...(profileStore.get() || {}), ...cloudPatch };
         profileStore.set(merged);
       }).catch(e => console.warn("[auth] updateCurrent:", e));
-      // Optimistic local update so the UI doesn't flicker.
       const merged = { ...(profileStore.get() || {}), ...cloudPatch };
       profileStore.set(merged);
       return { ...cur, ...patch };
@@ -1295,8 +1319,104 @@ const authStore = {
       location: arr[i].location || "",
       email: arr[i].email,
       provider: arr[i].provider,
+      bio: arr[i].bio || "",
+      favoriteType: arr[i].favoriteType || "",
+      avatarColor: arr[i].avatarColor || "",
+      initials: arr[i].initials || "",
     });
     return arr[i];
+  },
+
+  async changePassword({ currentPassword, newPassword }) {
+    const acc = this.current();
+    if (!acc) throw new Error("You're not signed in.");
+    if (acc.provider !== "email") {
+      throw new Error(`This account signs in with ${acc.provider === "google" ? "Google" : "Apple"} — manage the password there.`);
+    }
+    if (newPassword.length < 6) throw new Error("New password must be at least 6 characters.");
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) throw new Error("You're not signed in.");
+      try {
+        const cred = firebase.auth.EmailAuthProvider.credential(user.email, currentPassword);
+        await user.reauthenticateWithCredential(cred);
+        await user.updatePassword(newPassword);
+        return true;
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
+    const candidate = await hashPassword(currentPassword);
+    if (candidate !== acc.passwordHash) throw new Error("Current password is incorrect.");
+    const newHash = await hashPassword(newPassword);
+    this.updateCurrent({ passwordHash: newHash, passwordChangedAt: Date.now() });
+    return true;
+  },
+
+  // Local-mode only — cloud mode goes through sendPasswordResetEmail.
+  async setPasswordViaReset(newPassword) {
+    if (cloudSync.enabled) {
+      throw new Error("In cloud mode, reset your password via the link Firebase sent to your inbox.");
+    }
+    if (newPassword.length < 6) throw new Error("Password must be at least 6 characters.");
+    const newHash = await hashPassword(newPassword);
+    this.updateCurrent({ passwordHash: newHash, passwordChangedAt: Date.now() });
+    return true;
+  },
+
+  // Trigger Firebase's built-in password reset email. Cloud-only.
+  async sendCloudPasswordReset() {
+    if (!cloudSync.enabled) throw new Error("Cloud sign-in is not configured.");
+    const acc = this.current();
+    if (!acc) throw new Error("You're not signed in.");
+    try {
+      await window.fbAuth.sendPasswordResetEmail(acc.email);
+      return true;
+    } catch (e) {
+      throw new Error(humanFirebaseError(e));
+    }
+  },
+
+  async changeEmail(newEmail) {
+    const acc = this.current();
+    if (!acc) throw new Error("You're not signed in.");
+    const e = String(newEmail).trim().toLowerCase();
+    if (!isValidEmail(e)) throw new Error("Enter a valid email address.");
+    if (e === acc.email) throw new Error("That's already your email.");
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) throw new Error("You're not signed in.");
+      try {
+        // Firebase sends a verification link to the new address; the email
+        // only switches once the user clicks it.
+        await user.verifyBeforeUpdateEmail(e);
+        return { pendingVerification: true };
+      } catch (err) {
+        throw new Error(humanFirebaseError(err));
+      }
+    }
+    if (this.findByEmail(e)) throw new Error("Another account already uses that email.");
+    this.updateCurrent({ email: e, emailChangedAt: Date.now() });
+    return { pendingVerification: false };
+  },
+
+  async deleteCurrent() {
+    if (cloudSync.enabled) {
+      const user = window.fbAuth && window.fbAuth.currentUser;
+      if (!user) return false;
+      try {
+        await user.delete();
+        return true;
+      } catch (e) {
+        throw new Error(humanFirebaseError(e));
+      }
+    }
+    const id = localStorage.getItem(this.SESSION_KEY);
+    if (!id) return false;
+    const arr = this.accounts().filter(a => a.id !== id);
+    this.saveAccounts(arr);
+    this.signOut();
+    return true;
   },
 };
 
@@ -1456,14 +1576,6 @@ const TRADE_CATALOG_LIST = [
 ];
 const TRADE_CATALOG = Object.fromEntries(TRADE_CATALOG_LIST.map(c => [c.id, c]));
 
-const SEED_USER_LIBRARIES = {
-  Maya:  { collection: ["base1-15", "base1-10", "fossil-1", "base1-14"], wishlist: ["base1-4",  "base1-2",  "base1-8",  "base1-1"]  },
-  Hiro:  { collection: ["base1-1",  "jungle-1", "base1-58"],             wishlist: ["base1-15", "base1-16", "base1-6"]               },
-  Lena:  { collection: ["base1-2",  "fossil-1", "base1-16"],             wishlist: ["base1-4",  "base1-8",  "base1-14"]               },
-  Diego: { collection: ["base1-58", "base1-6",  "base1-14"],             wishlist: ["base1-4",  "base1-10", "base1-1"]                },
-  Sven:  { collection: ["base1-16", "jungle-1", "base1-8"],              wishlist: ["base1-15", "fossil-1", "base1-6",  "base1-58"]  },
-};
-
 const tradeStore = {
   list() { try { return JSON.parse(localStorage.getItem("trades")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("trades", JSON.stringify(arr)); cloudPush("trades", arr); refreshCounts(); },
@@ -1552,6 +1664,37 @@ function initials(name) {
   return String(name).split(/\s+/).map(p => p[0] || "").join("").slice(0, 2).toUpperCase();
 }
 
+const AVATAR_COLORS = [
+  { name: "Slate", value: "#475569" },
+  { name: "Crimson", value: "#dc2626" },
+  { name: "Ember", value: "#ea580c" },
+  { name: "Sun", value: "#ca8a04" },
+  { name: "Leaf", value: "#16a34a" },
+  { name: "Teal", value: "#0d9488" },
+  { name: "Sky", value: "#0284c7" },
+  { name: "Indigo", value: "#4f46e5" },
+  { name: "Violet", value: "#7c3aed" },
+  { name: "Pink", value: "#db2777" },
+];
+
+function avatarDisplay(profile) {
+  const fromInitials = (profile?.initials || "").trim();
+  if (fromInitials) return fromInitials.slice(0, 4);
+  return initials(profile?.name || "");
+}
+
+function paintAvatar(el, profile) {
+  if (!el || !profile) return;
+  el.textContent = avatarDisplay(profile);
+  if (profile.avatarColor) {
+    el.style.background = profile.avatarColor;
+    el.style.color = "#fff";
+  } else {
+    el.style.background = "";
+    el.style.color = "";
+  }
+}
+
 function refreshProfileNav() {
   const el = document.getElementById("nav-profile");
   if (!el) return;
@@ -1563,7 +1706,7 @@ function refreshProfileNav() {
     el.dataset.route = "profile";
     const av = document.createElement("span");
     av.className = "avatar avatar-sm";
-    av.textContent = initials(p.name);
+    paintAvatar(av, p);
     const nm = document.createElement("span");
     nm.textContent = p.name;
     el.appendChild(av);
@@ -1575,124 +1718,6 @@ function refreshProfileNav() {
   }
 }
 
-// ---- Seed data (demo content)
-const SEED_USERS = [
-  { name: "Maya", location: "Brooklyn, NY" },
-  { name: "Hiro", location: "Tokyo, Japan" },
-  { name: "Lena", location: "London, UK" },
-  { name: "Diego", location: "Austin, TX" },
-  { name: "Sven", location: "Berlin, Germany" },
-];
-
-const SEED_GROUPS = [
-  { name: "Brooklyn TCG League", description: "Weekly meetups, friendly matches, and trades.", location: "Brooklyn, NY", createdBy: "Maya", members: ["Maya", "Lena"] },
-  { name: "Vintage Pulls", description: "Base Set, Jungle, Fossil. Show off your old-school pulls.", location: "Global", createdBy: "Lena", members: ["Lena", "Sven", "Maya"] },
-  { name: "Tokyo Collectors", description: "Meet up at Akihabara card shops, share hauls.", location: "Tokyo, Japan", createdBy: "Hiro", members: ["Hiro"] },
-  { name: "Berlin Trade Circle", description: "Trades and tournaments around Berlin.", location: "Berlin, Germany", createdBy: "Sven", members: ["Sven"] },
-];
-
-const SEED_POSTS = [
-  { authorName: "Maya", content: "Just pulled an Umbreon VMAX from Evolving Skies. Heart still racing.", minutesAgo: 12 },
-  { authorName: "Hiro", content: "Looking for a Japanese Charizard ex. Anyone trading?", minutesAgo: 90 },
-  { authorName: "Lena", content: "Brought my binder to the local league for the first time. Great crew.", minutesAgo: 60 * 6 },
-  { authorName: "Diego", content: "First time grading. Sent 8 cards to PSA — any tips for surviving the wait?", minutesAgo: 60 * 24 },
-  { authorName: "Sven", content: "151 set is gorgeous. The Venusaur ex art is the best of the bunch, fight me.", minutesAgo: 60 * 24 * 2 },
-  { authorName: "Maya", content: "Open to local trades — I have a binder of holos from Lost Origin to swap.", minutesAgo: 60 * 24 * 3 },
-];
-
-// Seed IDs are deterministic so two devices/users seeding the same demo
-// content end up writing to the same Firestore docs (no duplicates after
-// cloud sync converges).
-function seedFeed() {
-  if (localStorage.getItem("feed-seeded") === "1") return;
-  const groups = SEED_GROUPS.map((g, i) => ({
-    id: `seed-g-${i}`,
-    name: g.name,
-    description: g.description,
-    location: g.location,
-    createdBy: g.createdBy,
-    createdAt: Date.now() - 60 * 60 * 24 * 7 * 1000,
-    members: g.members.slice(),
-  }));
-  groupStore.save(groups);
-
-  const userMap = Object.fromEntries(SEED_USERS.map(u => [u.name, u]));
-  const posts = SEED_POSTS.map((p, i) => {
-    const u = userMap[p.authorName];
-    return {
-      id: `seed-p-${i}`,
-      authorName: u.name,
-      authorLocation: u.location,
-      content: p.content,
-      card: null,
-      groupId: null,
-      createdAt: Date.now() - p.minutesAgo * 60 * 1000,
-      likes: [],
-    };
-  });
-  postStore.save(posts);
-
-  localStorage.setItem("feed-seeded", "1");
-}
-
-const SEED_EVENTS = [
-  { title: "Brooklyn TCG Trade Night", description: "Bring your binders. Casual trades, friendly vibes, snacks provided.", location: "Brooklyn, NY", maxPeople: 24, createdBy: "Maya", verified: true, attendees: ["Maya", "Lena"], daysAgo: 2 },
-  { title: "Vintage Pulls Showcase", description: "Show off your Base Set, Jungle, and Fossil pulls. Bring sleeves.", location: "Global", maxPeople: 100, createdBy: "Lena", verified: true, attendees: ["Lena", "Sven", "Maya", "Hiro"], daysAgo: 5 },
-  { title: "Akihabara Card Shop Crawl", description: "Hitting four shops in one afternoon. Meet at Mandarake.", location: "Tokyo, Japan", maxPeople: 8, createdBy: "Hiro", verified: false, attendees: ["Hiro"], daysAgo: 1 },
-];
-
-function seedEvents() {
-  if (localStorage.getItem("events-seeded") === "1") return;
-  const userMap = Object.fromEntries(SEED_USERS.map(u => [u.name, u]));
-  const events = SEED_EVENTS.map((e, i) => {
-    const u = userMap[e.createdBy];
-    return {
-      id: `seed-e-${i}`,
-      title: e.title,
-      description: e.description,
-      location: e.location,
-      maxPeople: e.maxPeople,
-      photos: [],
-      createdBy: e.createdBy,
-      createdAt: Date.now() - e.daysAgo * 24 * 60 * 60 * 1000,
-      verified: e.verified,
-      attendees: e.attendees.slice(),
-    };
-  });
-  eventStore.save(events);
-  const sigs = events.filter(e => e.verified).map(e => verifiedTemplateStore.signature(e.title, e.location));
-  verifiedTemplateStore.save(Array.from(new Set(sigs)));
-  localStorage.setItem("events-seeded", "1");
-}
-
-function seedCommunityIfNeeded() {
-  const me = profileStore.get();
-  if (!me) return;
-  if (localStorage.getItem("feed-seeded-community") === "1") return;
-  const nearby = [
-    { authorName: "Mira", content: "New to the area! Any good shops near here?", minutesAgo: 30 },
-    { authorName: "Jules", content: "League night tomorrow. Bringing my Lost Box list.", minutesAgo: 60 * 4 },
-  ];
-  const locSlug = String(me.location || me.name || "anon")
-    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "anon";
-  const add = nearby.map((p, i) => ({
-    id: `community-${locSlug}-${i}`,
-    authorName: p.authorName,
-    authorLocation: me.location,
-    content: p.content,
-    card: null,
-    groupId: null,
-    createdAt: Date.now() - p.minutesAgo * 60 * 1000,
-    likes: [],
-  }));
-  const all = postStore.list();
-  // Drop any prior community posts with the same IDs so we don't carry
-  // duplicates if a user changes location and the community seed re-runs.
-  const addIds = new Set(add.map(p => p.id));
-  postStore.save([...add, ...all.filter(p => !addIds.has(p.id))]);
-  localStorage.setItem("feed-seeded-community", "1");
-}
-
 // ---- Render: Profile
 function renderProfile() {
   setActiveNav("profile");
@@ -1700,36 +1725,375 @@ function renderProfile() {
   view.appendChild(tpl("tpl-profile"));
 
   const acc = authStore.current();
-  const me = profileStore.get();
-  document.getElementById("profile-title").textContent = "Edit your profile";
+  if (!acc) { location.hash = "#/login"; return; }
 
-  const meta = document.getElementById("profile-meta");
-  if (acc) {
-    const providerLabel = acc.provider === "google" ? "Google" : acc.provider === "apple" ? "Apple" : "email";
-    meta.textContent = `Signed in as ${acc.email} via ${providerLabel}.`;
+  const flash = document.getElementById("profile-flash");
+  let flashTimer = null;
+  function showFlash(msg, kind = "ok") {
+    flash.textContent = msg;
+    flash.classList.remove("hidden", "profile-flash-error");
+    if (kind === "error") flash.classList.add("profile-flash-error");
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => flash.classList.add("hidden"), 4000);
   }
 
+  function paintHeader() {
+    const me = profileStore.get();
+    paintAvatar(document.getElementById("pf-avatar-preview"), me);
+    const meta = document.getElementById("profile-meta");
+    const a = authStore.current();
+    if (a && me) {
+      const providerLabel = a.provider === "google" ? "Google" : a.provider === "apple" ? "Apple" : "email";
+      const bits = [me.name, me.location, `${a.email} · ${providerLabel}`].filter(Boolean);
+      meta.textContent = bits.join(" · ");
+    }
+    const emailSub = document.getElementById("pf-email-sub");
+    if (emailSub && a) emailSub.textContent = a.email;
+  }
+
+  // ---- Identity form
+  const me = profileStore.get() || {};
   const nameInp = document.getElementById("pf-name");
-  const emailInp = document.getElementById("pf-email");
   const locInp = document.getElementById("pf-loc");
-
-  if (me) {
-    nameInp.value = me.name || "";
-    locInp.value = me.location || "";
-  }
-  if (emailInp) emailInp.value = acc?.email || "";
+  const bioInp = document.getElementById("pf-bio");
+  const typeInp = document.getElementById("pf-type");
+  const bioCount = document.getElementById("pf-bio-count");
+  nameInp.value = me.name || "";
+  locInp.value = me.location || "";
+  bioInp.value = me.bio || "";
+  typeInp.value = me.favoriteType || "";
+  bioCount.textContent = bioInp.value.length;
+  bioInp.addEventListener("input", () => { bioCount.textContent = bioInp.value.length; });
 
   document.getElementById("profile-form").addEventListener("submit", e => {
     e.preventDefault();
     const name = nameInp.value.trim();
     const loc = locInp.value.trim();
     if (!name || !loc) return;
-    authStore.updateCurrent({ displayName: name, location: loc });
-    seedCommunityIfNeeded();
-    location.hash = "#/feed";
+    authStore.updateCurrent({
+      displayName: name,
+      location: loc,
+      bio: bioInp.value.trim(),
+      favoriteType: typeInp.value,
+    });
+    paintHeader();
+    showFlash("Profile saved.");
   });
 
+  // ---- Avatar form
+  const colorRow = document.getElementById("pf-color-row");
+  const initialsInp = document.getElementById("pf-initials");
+  initialsInp.value = me.initials || "";
+  let selectedColor = me.avatarColor || "";
+  function renderColors() {
+    colorRow.innerHTML = "";
+    const blank = document.createElement("button");
+    blank.type = "button";
+    blank.className = "color-swatch color-swatch-default";
+    blank.title = "Default";
+    blank.setAttribute("aria-label", "Default color");
+    blank.setAttribute("role", "radio");
+    blank.setAttribute("aria-checked", selectedColor === "" ? "true" : "false");
+    if (selectedColor === "") blank.classList.add("selected");
+    blank.addEventListener("click", () => { selectedColor = ""; renderColors(); });
+    colorRow.appendChild(blank);
+    AVATAR_COLORS.forEach(c => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "color-swatch";
+      b.style.background = c.value;
+      b.title = c.name;
+      b.setAttribute("aria-label", c.name);
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", selectedColor === c.value ? "true" : "false");
+      if (selectedColor === c.value) b.classList.add("selected");
+      b.addEventListener("click", () => { selectedColor = c.value; renderColors(); });
+      colorRow.appendChild(b);
+    });
+  }
+  renderColors();
+
+  document.getElementById("avatar-form").addEventListener("submit", e => {
+    e.preventDefault();
+    authStore.updateCurrent({
+      avatarColor: selectedColor,
+      initials: initialsInp.value.trim().slice(0, 4),
+    });
+    paintHeader();
+    showFlash("Avatar updated.");
+  });
+
+  // ---- Email form
+  const emailInp = document.getElementById("pf-email");
+  const newEmailInp = document.getElementById("pf-new-email");
+  const emailMsg = document.getElementById("email-msg");
+  emailInp.value = acc.email;
+
+  function showEmailMsg(msg, kind = "error") {
+    emailMsg.textContent = msg;
+    emailMsg.classList.remove("hidden");
+    emailMsg.classList.toggle("auth-error", kind === "error");
+  }
+  function clearEmailMsg() {
+    emailMsg.textContent = "";
+    emailMsg.classList.add("hidden");
+  }
+
+  document.getElementById("email-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    clearEmailMsg();
+    const next = newEmailInp.value.trim();
+    if (!isValidEmail(next)) return showEmailMsg("Enter a valid email address.");
+    const a = authStore.current();
+    if (a && next.toLowerCase() === a.email) return showEmailMsg("That's already your email.");
+
+    // Cloud mode: let Firebase send a real verification link to the new
+    // address. The email only switches after the user clicks the link.
+    if (cloudSync.enabled) {
+      try {
+        await authStore.changeEmail(next);
+        newEmailInp.value = "";
+        showFlash(`Verification email sent to ${next}. Click the link to switch your email.`);
+      } catch (err) {
+        showEmailMsg(err.message || "Couldn't send verification email.");
+      }
+      return;
+    }
+
+    // Local mode: send a 6-digit code via EmailJS, verify, then switch.
+    if (authStore.findByEmail(next)) return showEmailMsg("Another account already uses that email.");
+    openCodeModal({
+      title: "Confirm your new email",
+      intro: `We're sending a 6-digit code to ${next}.`,
+      email: next,
+      purpose: "email change",
+      onVerified: async () => {
+        try {
+          await authStore.changeEmail(next);
+          newEmailInp.value = "";
+          emailInp.value = next;
+          paintHeader();
+          showFlash(`Email updated to ${next}.`);
+        } catch (err) {
+          showEmailMsg(err.message || "Couldn't change email.");
+        }
+      },
+    });
+  });
+
+  // ---- Password form
+  const passwordCard = document.getElementById("password-card");
+  const passwordSub = document.getElementById("pf-password-sub");
+  const currentPw = document.getElementById("pf-current-pw");
+  const newPw = document.getElementById("pf-new-pw");
+  const confirmPw = document.getElementById("pf-confirm-pw");
+  const passwordMsg = document.getElementById("password-msg");
+  const passwordSubmit = document.getElementById("password-submit");
+  const resetLinkBtn = document.getElementById("password-reset-link");
+
+  if (acc.provider !== "email") {
+    passwordSub.textContent = `Managed by ${acc.provider === "google" ? "Google" : "Apple"} — no password to change.`;
+    [currentPw, newPw, confirmPw, passwordSubmit].forEach(el => { el.disabled = true; });
+    resetLinkBtn.disabled = true;
+  }
+
+  function showPwMsg(msg, kind = "error") {
+    passwordMsg.textContent = msg;
+    passwordMsg.classList.remove("hidden");
+    passwordMsg.classList.toggle("auth-error", kind === "error");
+  }
+  function clearPwMsg() {
+    passwordMsg.textContent = "";
+    passwordMsg.classList.add("hidden");
+  }
+
+  document.getElementById("password-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    clearPwMsg();
+    if (acc.provider !== "email") return;
+    if (newPw.value !== confirmPw.value) return showPwMsg("New passwords don't match.");
+    passwordSubmit.disabled = true;
+    passwordSubmit.textContent = "Updating…";
+    try {
+      await authStore.changePassword({ currentPassword: currentPw.value, newPassword: newPw.value });
+      currentPw.value = ""; newPw.value = ""; confirmPw.value = "";
+      showFlash("Password updated.");
+    } catch (err) {
+      showPwMsg(err.message || "Couldn't update password.");
+    } finally {
+      passwordSubmit.disabled = false;
+      passwordSubmit.textContent = "Update password";
+    }
+  });
+
+  resetLinkBtn.addEventListener("click", async () => {
+    if (acc.provider !== "email") return;
+    if (cloudSync.enabled) {
+      // Firebase sends a real reset link; the user clicks it to choose a new
+      // password on Firebase's hosted page.
+      try {
+        await authStore.sendCloudPasswordReset();
+        showFlash(`Reset link sent to ${acc.email}. Check your inbox.`);
+      } catch (err) {
+        showFlash(err.message || "Couldn't send reset link.", "error");
+      }
+      return;
+    }
+    openCodeModal({
+      title: "Reset your password",
+      intro: `We're sending a 6-digit code to ${acc.email}.`,
+      email: acc.email,
+      purpose: "password reset",
+      onVerified: () => {
+        const next = window.prompt("Choose a new password (at least 6 characters)");
+        if (next == null) return;
+        authStore.setPasswordViaReset(next).then(() => {
+          showFlash("Password reset — you can sign in with the new password.");
+        }).catch(err => showFlash(err.message || "Couldn't reset password.", "error"));
+      },
+    });
+  });
+
+  // ---- Account
   document.getElementById("profile-signout").addEventListener("click", () => logout());
+  document.getElementById("profile-delete").addEventListener("click", async () => {
+    if (!window.confirm("Delete your CardKave account? This signs you out and removes your login. Local card data stays in this browser.")) return;
+    try {
+      await authStore.deleteCurrent();
+      window.location.hash = "#/login";
+    } catch (err) {
+      // Firebase requires recent reauth for deletion — surface that clearly.
+      showFlash(err.message || "Couldn't delete account.", "error");
+    }
+  });
+
+  paintHeader();
+}
+
+// ---- EmailJS verification ----
+const CODE_TTL_MS = 15 * 60 * 1000;
+
+function isEmailServiceConfigured() {
+  return !!(EMAIL_CONFIG.publicKey && EMAIL_CONFIG.serviceId && EMAIL_CONFIG.templateId);
+}
+
+function initEmailService() {
+  if (!isEmailServiceConfigured()) return;
+  if (typeof emailjs === "undefined") return;
+  try { emailjs.init({ publicKey: EMAIL_CONFIG.publicKey }); } catch {}
+}
+
+function generateCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function sendVerificationCode({ to, purpose }) {
+  if (!isEmailServiceConfigured()) {
+    throw new Error("Email service isn't set up yet. Add your EmailJS credentials to EMAIL_CONFIG at the top of app.js.");
+  }
+  if (typeof emailjs === "undefined") {
+    throw new Error("Email service is loading — try again in a moment.");
+  }
+  const code = generateCode();
+  await emailjs.send(EMAIL_CONFIG.serviceId, EMAIL_CONFIG.templateId, {
+    to_email: to,
+    code,
+    purpose,
+  });
+  return { code, expiresAt: Date.now() + CODE_TTL_MS };
+}
+
+// Open a modal that sends a real 6-digit code to `email`, then waits for the
+// user to type it back. Calls onVerified() when the code matches.
+function openCodeModal({ title, intro, email, purpose, onVerified }) {
+  const modal = document.getElementById("email-link-modal");
+  const titleEl = document.getElementById("email-link-title");
+  const textEl = document.getElementById("email-link-text");
+  const codeInp = document.getElementById("email-link-code");
+  const errEl = document.getElementById("email-link-error");
+  const confirmBtn = document.getElementById("email-link-confirm");
+  const resendBtn = document.getElementById("email-link-resend");
+  const closeBtn = document.getElementById("email-link-close");
+  const backdrop = document.getElementById("email-link-backdrop");
+  const fine = document.getElementById("email-link-fine");
+
+  titleEl.textContent = title;
+  textEl.textContent = intro;
+  codeInp.value = "";
+  fine.textContent = "This code expires in 15 minutes.";
+  hideErr();
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  let pending = null;
+
+  function hideErr() {
+    errEl.textContent = "";
+    errEl.classList.add("hidden");
+  }
+  function showErr(msg) {
+    errEl.textContent = msg;
+    errEl.classList.remove("hidden");
+  }
+  function setSending(flag) {
+    resendBtn.disabled = flag;
+    confirmBtn.disabled = flag;
+  }
+
+  async function sendCode(initial) {
+    setSending(true);
+    if (initial) {
+      titleEl.textContent = "Sending code…";
+      textEl.textContent = `Sending a code to ${email}.`;
+    } else {
+      fine.textContent = "Sending a new code…";
+    }
+    try {
+      pending = await sendVerificationCode({ to: email, purpose });
+      titleEl.textContent = title;
+      textEl.textContent = `We sent a 6-digit code to ${email}. Enter it below to confirm.`;
+      fine.textContent = "This code expires in 15 minutes.";
+      codeInp.focus();
+    } catch (err) {
+      titleEl.textContent = title;
+      textEl.textContent = intro;
+      fine.textContent = "Couldn't send a code.";
+      showErr(err.message || "Couldn't send verification code.");
+      pending = null;
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function verify() {
+    hideErr();
+    if (!pending) return showErr("No code to verify — request a new one.");
+    if (Date.now() > pending.expiresAt) { pending = null; return showErr("That code expired. Tap \"Resend code\" to get a new one."); }
+    const entered = codeInp.value.trim();
+    if (entered.length !== 6 || !/^\d{6}$/.test(entered)) return showErr("Enter the 6-digit code from the email.");
+    if (entered !== pending.code) return showErr("That code doesn't match. Double-check the email.");
+    close();
+    onVerified && onVerified();
+  }
+
+  function close() {
+    modal.classList.add("hidden");
+    document.body.classList.remove("modal-open");
+    confirmBtn.removeEventListener("click", verify);
+    resendBtn.removeEventListener("click", onResend);
+    closeBtn.removeEventListener("click", close);
+    backdrop.removeEventListener("click", close);
+    codeInp.removeEventListener("keydown", onKey);
+  }
+  function onResend() { sendCode(false); }
+  function onKey(e) { if (e.key === "Enter") { e.preventDefault(); verify(); } }
+
+  confirmBtn.addEventListener("click", verify);
+  resendBtn.addEventListener("click", onResend);
+  closeBtn.addEventListener("click", close);
+  backdrop.addEventListener("click", close);
+  codeInp.addEventListener("keydown", onKey);
+
+  sendCode(true);
 }
 
 // ---- Render: Login
@@ -1770,7 +2134,6 @@ function renderLogin() {
     submitBtn.textContent = "Signing in…";
     try {
       await authStore.signInWithPassword({ email, password });
-      seedCommunityIfNeeded();
       location.hash = "#/browse";
     } catch (err) {
       showError(err.message || "Sign-in failed.");
@@ -1790,7 +2153,6 @@ function renderLogin() {
         if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile });
       }
-      seedCommunityIfNeeded();
       location.hash = "#/browse";
     } catch (err) { showError(err.message); }
   });
@@ -1805,7 +2167,6 @@ function renderLogin() {
       const profile = await runAppleOAuth();
       if (!profile) return;
       authStore.signInWithProvider({ provider: "apple", ...profile });
-      seedCommunityIfNeeded();
       location.hash = "#/browse";
     } catch (err) { showError(err.message); }
   });
@@ -1859,7 +2220,6 @@ function renderSignup() {
     submitBtn.textContent = "Creating account…";
     try {
       await authStore.createEmailAccount({ name, email, location: loc, password });
-      seedCommunityIfNeeded();
       window.location.hash = "#/browse";
     } catch (err) {
       showError(err.message || "Could not create account.");
@@ -1879,7 +2239,6 @@ function renderSignup() {
         if (!profile) return;
         authStore.signInWithProvider({ provider: "google", ...profile, location: locInp.value.trim() });
       }
-      seedCommunityIfNeeded();
       location.hash = "#/browse";
     } catch (err) { showError(err.message); }
   });
@@ -1894,7 +2253,6 @@ function renderSignup() {
       const profile = await runAppleOAuth();
       if (!profile) return;
       authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
-      seedCommunityIfNeeded();
       location.hash = "#/browse";
     } catch (err) { showError(err.message); }
   });
@@ -1978,30 +2336,8 @@ function runGoogleOAuthSimulator() {
     document.getElementById("oauth-close").addEventListener("click", () => settle(null));
     document.getElementById("oauth-backdrop").addEventListener("click", () => settle(null));
 
-    const PRESETS = {
-      alex: { email: "alex.tanaka@gmail.com", displayName: "Alex Tanaka" },
-      jordan: { email: "jordan.reeves@gmail.com", displayName: "Jordan Reeves" },
-    };
-    popup.querySelectorAll(".oauth-account[data-account]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const key = btn.dataset.account;
-        if (!PRESETS[key]) return;
-        showLoadingState(popup, "Signing in to Google…");
-        setTimeout(() => settle(PRESETS[key]), 650);
-      });
-    });
-
-    const list = document.getElementById("oauth-account-list");
     const customForm = document.getElementById("oauth-google-custom");
-    document.getElementById("oauth-add-google").addEventListener("click", () => {
-      list.classList.add("hidden");
-      customForm.classList.remove("hidden");
-      document.getElementById("oauth-google-email").focus();
-    });
-    document.getElementById("oauth-google-back").addEventListener("click", () => {
-      customForm.classList.add("hidden");
-      list.classList.remove("hidden");
-    });
+    setTimeout(() => document.getElementById("oauth-google-email").focus(), 50);
     customForm.addEventListener("submit", e => {
       e.preventDefault();
       const email = document.getElementById("oauth-google-email").value.trim();
@@ -2164,7 +2500,12 @@ function makePostEl(post, me) {
   head.className = "post-head";
   const av = document.createElement("span");
   av.className = "avatar";
-  av.textContent = initials(post.authorName);
+  const myProfile = profileStore.get();
+  if (myProfile && post.authorName === myProfile.name) {
+    paintAvatar(av, myProfile);
+  } else {
+    av.textContent = initials(post.authorName);
+  }
   head.appendChild(av);
 
   const meta = document.createElement("div");
@@ -2232,7 +2573,7 @@ function mountCompose(host, opts) {
   host.appendChild(tpl("tpl-compose"));
 
   const me = profileStore.get();
-  document.getElementById("compose-avatar").textContent = initials(me.name);
+  paintAvatar(document.getElementById("compose-avatar"), me);
   document.getElementById("compose-meta").textContent = `${me.name} · ${me.location}`;
 
   const attach = document.getElementById("compose-attach");
@@ -2778,37 +3119,8 @@ function renderEvent(id) {
 }
 
 // ---- Trades feature
-function buildTradeMatches(me) {
-  if (!me) return [];
-  const myColl = collectionCards.list();
-  const myWish = wishlistCards.list();
-  const collById = Object.fromEntries(myColl.map(c => [c.id, c]));
-  const wishById = Object.fromEntries(myWish.map(c => [c.id, c]));
-  const myCollIds = Object.keys(collById);
-  const myWishIds = Object.keys(wishById);
-
-  const matches = [];
-  for (const u of SEED_USERS) {
-    const lib = SEED_USER_LIBRARIES[u.name];
-    if (!lib) continue;
-    const theyHaveIds = lib.collection.filter(id => myWishIds.includes(id));
-    const iHaveIds = myCollIds.filter(id => lib.wishlist.includes(id));
-    if (!theyHaveIds.length || !iHaveIds.length) continue;
-    matches.push({
-      user: u,
-      theyHaveIWant: theyHaveIds.map(id => TRADE_CATALOG[id] || wishById[id]).filter(Boolean),
-      iHaveTheyWant: iHaveIds.map(id => collById[id]).filter(Boolean),
-    });
-  }
-
-  const local = (me.location || "").toLowerCase();
-  matches.sort((a, b) => {
-    const al = a.user.location.toLowerCase() === local ? 0 : 1;
-    const bl = b.user.location.toLowerCase() === local ? 0 : 1;
-    if (al !== bl) return al - bl;
-    return (b.theyHaveIWant.length + b.iHaveTheyWant.length) - (a.theyHaveIWant.length + a.iHaveTheyWant.length);
-  });
-  return matches;
+function buildTradeMatches(_me) {
+  return [];
 }
 
 function statusLabel(s) {
@@ -3307,15 +3619,13 @@ function paintTradeMessages(trade, me) {
 
 function mountEditTrade(host, trade, isFromUser, onSaved) {
   host.appendChild(tpl("tpl-trade-edit"));
-  const otherName = isFromUser ? trade.toUserName : trade.fromUserName;
-  const lib = SEED_USER_LIBRARIES[otherName] || { collection: [] };
   const myCards = collectionCards.list();
-  const theirCards = lib.collection.map(id => TRADE_CATALOG[id]).filter(Boolean);
+  const currentMine = isFromUser ? trade.fromCard : trade.toCard;
+  const currentTheirs = isFromUser ? trade.toCard : trade.fromCard;
+  const theirCards = currentTheirs ? [currentTheirs] : [];
 
   const mineHost = document.getElementById("edit-mine");
   const theirsHost = document.getElementById("edit-theirs");
-  const currentMine = isFromUser ? trade.fromCard : trade.toCard;
-  const currentTheirs = isFromUser ? trade.toCard : trade.fromCard;
 
   if (!myCards.length) {
     const p = document.createElement("p");
@@ -3328,7 +3638,7 @@ function mountEditTrade(host, trade, isFromUser, onSaved) {
   if (!theirCards.length) {
     const p = document.createElement("p");
     p.className = "muted";
-    p.textContent = `No catalog data for ${otherName}.`;
+    p.textContent = "The other side of this trade can't be changed.";
     theirsHost.appendChild(p);
   } else {
     theirCards.forEach(c => theirsHost.appendChild(makeTradeCardOption("edit-theirs", c, c.id === currentTheirs?.id)));
@@ -3864,15 +4174,14 @@ function route() {
 
 window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", async () => {
+  initEmailService();
   // If cloud sync is on, wait for the first auth state to resolve so we
   // don't bounce a logged-in user to /login while Firebase loads their
   // persisted session from IndexedDB.
   if (window.cloudSync && cloudSync.enabled) {
     try { await cloudSync.ready; } catch {}
   }
-  seedFeed();
-  seedEvents();
-  seedCommunityIfNeeded();
+  pruneLegacySeedContent();
   refreshCounts();
   refreshAuthUI();
   paintLastUpdated();
@@ -3882,13 +4191,41 @@ window.addEventListener("DOMContentLoaded", async () => {
 });
 
 // React to remote changes pushed in by cloud-sync.js — re-render the
-// current view so other devices' edits show up live.
+// current view so other devices' edits show up live. Also re-prune any
+// seed content that another device might have re-uploaded.
 window.addEventListener("cloudsync:change", () => {
+  pruneLegacySeedContent();
   refreshCounts();
   refreshAuthUI();
-  // Re-route to redraw whatever's on screen with the freshest data.
   route();
 });
+
+// Remove any legacy seed posts/groups/events that earlier app versions wrote
+// to localStorage or Firestore. Idempotent — safe to call on every cloud
+// change. Saves only when something actually needs to be removed, so the
+// cloud-sync diff push is a no-op when nothing has changed.
+function pruneLegacySeedContent() {
+  ["feed-seeded", "feed-seeded-community", "events-seeded"].forEach(k => localStorage.removeItem(k));
+  const seedAuthors = new Set(["Maya", "Hiro", "Lena", "Diego", "Sven", "Mira", "Jules"]);
+  const seedGroupNames = new Set(["Brooklyn TCG League", "Vintage Pulls", "Tokyo Collectors", "Berlin Trade Circle"]);
+  const seedEventTitles = new Set(["Brooklyn TCG Trade Night", "Vintage Pulls Showcase", "Akihabara Card Shop Crawl"]);
+
+  const posts = postStore.list();
+  const cleanPosts = posts.filter(p => {
+    if (seedAuthors.has(p.authorName)) return false;
+    const id = String(p.id || "");
+    return !(id.startsWith("seed-p-") || id.startsWith("community-"));
+  });
+  if (cleanPosts.length !== posts.length) postStore.save(cleanPosts);
+
+  const groups = groupStore.list();
+  const cleanGroups = groups.filter(g => !seedGroupNames.has(g.name) && !String(g.id || "").startsWith("seed-g-"));
+  if (cleanGroups.length !== groups.length) groupStore.save(cleanGroups);
+
+  const events = eventStore.list();
+  const cleanEvents = events.filter(e => !seedEventTitles.has(e.title) && !String(e.id || "").startsWith("seed-e-"));
+  if (cleanEvents.length !== events.length) eventStore.save(cleanEvents);
+}
 
 function paintLastUpdated() {
   const el = document.getElementById("last-updated");
