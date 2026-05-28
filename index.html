@@ -559,13 +559,13 @@
 
   <template id="tpl-new-group">
     <form id="new-group-form" class="new-group-form">
-      <h3 class="h2">Create a group</h3>
-      <p class="muted">Other collectors can join after you publish.</p>
+      <h3 class="h2" id="ng-heading">Create a group</h3>
+      <p class="muted" id="ng-subnote">Other collectors can join after you publish.</p>
       <label class="field"><span class="field-label">Name</span><input id="ng-name" class="input" required maxlength="60" /></label>
       <label class="field"><span class="field-label">Location</span><input id="ng-loc" class="input" placeholder="e.g. Brooklyn, NY or Global" required maxlength="60" /></label>
       <label class="field"><span class="field-label">Description</span><textarea id="ng-desc" class="input" required maxlength="240"></textarea></label>
       <div class="actions">
-        <button class="btn" type="submit">Create</button>
+        <button class="btn" type="submit" id="ng-submit">Create</button>
         <button class="btn ghost" type="button" id="ng-cancel">Cancel</button>
       </div>
     </form>
@@ -578,10 +578,25 @@
         <div>
           <h1 class="h1" id="group-name"></h1>
           <p class="muted mono" id="group-meta"></p>
+          <div id="group-tags" class="event-tags"></div>
         </div>
-        <button id="group-join" class="btn" type="button">Join</button>
+        <div class="event-actions">
+          <button id="group-edit" class="btn ghost hidden" type="button">Edit group</button>
+          <button id="group-new-event" class="btn ghost hidden" type="button">+ New event</button>
+          <button id="group-join" class="btn" type="button">Join</button>
+        </div>
       </div>
+      <div id="group-edit-host"></div>
       <p id="group-desc"></p>
+      <div id="group-editors-host"></div>
+      <div id="group-new-event-host"></div>
+      <section class="group-events-section">
+        <div class="row">
+          <h2 class="h2">Group events</h2>
+        </div>
+        <div id="group-events-list" class="events-list"></div>
+        <p id="group-events-empty" class="muted center hidden">No events for this group yet.</p>
+      </section>
       <div id="compose-host"></div>
       <div id="feed-list" class="feed-list"></div>
       <p id="feed-empty" class="muted center hidden">No posts in this group yet.</p>
@@ -607,7 +622,8 @@
 
   <template id="tpl-new-event">
     <form id="new-event-form" class="new-event-form">
-      <h3 class="h2">Create an event</h3>
+      <h3 class="h2" id="ne-heading">Create an event</h3>
+      <p class="muted hidden" id="ne-group-scope"></p>
       <p class="muted" id="ne-verify-note">New events need to be verified by a moderator before they go live. Reusing a previously verified title and location will publish instantly.</p>
       <label class="field"><span class="field-label">Title</span><input id="ne-title" class="input" required maxlength="80" /></label>
       <label class="field"><span class="field-label">Location</span><input id="ne-loc" class="input" placeholder="e.g. Brooklyn, NY" required maxlength="80" /></label>
@@ -619,7 +635,7 @@
       </label>
       <div id="ne-photo-preview" class="photo-preview"></div>
       <div class="actions">
-        <button class="btn" type="submit">Submit</button>
+        <button class="btn" type="submit" id="ne-submit">Submit</button>
         <button class="btn ghost" type="button" id="ne-cancel">Cancel</button>
       </div>
     </form>
@@ -627,17 +643,20 @@
 
   <template id="tpl-event">
     <section class="stack">
-      <a class="back" href="#/events">&larr; All events</a>
+      <a class="back" id="event-back" href="#/events">&larr; All events</a>
       <div class="row">
         <div>
           <h1 class="h1" id="event-title"></h1>
           <p class="muted mono" id="event-meta"></p>
+          <div id="event-tags" class="event-tags"></div>
         </div>
         <div class="event-actions">
           <span id="event-status" class="event-status"></span>
+          <button id="event-edit" class="btn ghost hidden" type="button">Edit</button>
           <button id="event-rsvp" class="btn" type="button"></button>
         </div>
       </div>
+      <div id="event-edit-host"></div>
       <div id="event-photos" class="event-photos"></div>
       <p id="event-desc" class="event-desc"></p>
       <div class="event-attendance">
@@ -645,6 +664,7 @@
         <span id="event-attendance-label" class="muted mono"></span>
       </div>
       <div id="event-verify-host"></div>
+      <div id="event-editors-host"></div>
     </section>
   </template>
 

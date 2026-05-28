@@ -1482,6 +1482,15 @@ const postStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); cloudPush("feed-posts", arr); },
   add(p) { const arr = this.list(); arr.unshift(p); this.save(arr); },
+  byId(id) { return this.list().find(p => p.id === id); },
+  update(id, patch) {
+    const arr = this.list();
+    const i = arr.findIndex(p => p.id === id);
+    if (i < 0) return null;
+    arr[i] = { ...arr[i], ...patch };
+    this.save(arr);
+    return arr[i];
+  },
   toggleLike(id, name) {
     const arr = this.list();
     const p = arr.find(x => x.id === id);
@@ -1498,6 +1507,14 @@ const groupStore = {
   save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); cloudPush("feed-groups", arr); },
   add(g) { const arr = this.list(); arr.unshift(g); this.save(arr); },
   byId(id) { return this.list().find(g => g.id === id); },
+  update(id, patch) {
+    const arr = this.list();
+    const i = arr.findIndex(g => g.id === id);
+    if (i < 0) return null;
+    arr[i] = { ...arr[i], ...patch };
+    this.save(arr);
+    return arr[i];
+  },
   toggleMember(id, name) {
     const arr = this.list();
     const g = arr.find(x => x.id === id);
@@ -1506,6 +1523,10 @@ const groupStore = {
     const i = g.members.indexOf(name);
     const joined = i < 0;
     if (i >= 0) g.members.splice(i, 1); else g.members.push(name);
+    if (!joined) {
+      // If they're leaving, also drop them from editors.
+      g.editors = (g.editors || []).filter(n => n !== name);
+    }
     this.save(arr);
     return joined;
   },
@@ -2515,6 +2536,16 @@ function makePostEl(post, me) {
   const name = document.createElement("strong");
   name.textContent = post.authorName;
   nameRow.appendChild(name);
+  const creatorChip = document.createElement("span");
+  creatorChip.className = "creator-chip";
+  creatorChip.textContent = "Creator";
+  nameRow.appendChild(creatorChip);
+  (post.editors || []).forEach(n => {
+    const chip = document.createElement("span");
+    chip.className = "editor-chip";
+    chip.textContent = `Editor · ${n}`;
+    nameRow.appendChild(chip);
+  });
   meta.appendChild(nameRow);
 
   const sub = document.createElement("div");
@@ -2545,6 +2576,14 @@ function makePostEl(post, me) {
     wrap.appendChild(cardEl);
   }
 
+  const editHost = document.createElement("div");
+  editHost.className = "post-edit-host";
+  wrap.appendChild(editHost);
+
+  const editorsHost = document.createElement("div");
+  editorsHost.className = "post-editors-host";
+  wrap.appendChild(editorsHost);
+
   const actions = document.createElement("div");
   actions.className = "post-actions";
   const likeBtn = document.createElement("button");
@@ -2558,13 +2597,97 @@ function makePostEl(post, me) {
   likeBtn.addEventListener("click", () => {
     if (!me) return;
     postStore.toggleLike(post.id, me.name);
-    const updated = postStore.list().find(x => x.id === post.id);
+    const updated = postStore.byId(post.id);
     wrap.replaceWith(makePostEl(updated, profileStore.get()));
   });
   actions.appendChild(likeBtn);
+
+  if (canEditPost(post, me)) {
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "post-action-link";
+    editBtn.textContent = "Edit";
+    editBtn.addEventListener("click", () => {
+      if (editHost.firstChild) { editHost.innerHTML = ""; return; }
+      mountEditPostForm(editHost, post, () => {
+        const updated = postStore.byId(post.id);
+        wrap.replaceWith(makePostEl(updated, profileStore.get()));
+      });
+    });
+    actions.appendChild(editBtn);
+  }
+
+  // Co-editor management — only the post creator sees this, and only on
+  // group posts (the editor pool = the group's members).
+  if (me && me.name === post.authorName && post.groupId) {
+    const group = groupStore.byId(post.groupId);
+    if (group) {
+      const editorsBtn = document.createElement("button");
+      editorsBtn.type = "button";
+      editorsBtn.className = "post-action-link";
+      editorsBtn.textContent = "Co-editors";
+      editorsBtn.addEventListener("click", () => {
+        if (editorsHost.firstChild) { editorsHost.innerHTML = ""; return; }
+        renderEditorsPanel(editorsHost, {
+          title: "Post co-editors",
+          subtitle: `Grant other ${group.name} members permission to edit this post.`,
+          creator: post.authorName,
+          eligibleNames: group.members || [],
+          editors: post.editors || [],
+          emptyMessage: "No other members have joined this group yet.",
+          onChange: next => {
+            postStore.update(post.id, { editors: next });
+            const updated = postStore.byId(post.id);
+            wrap.replaceWith(makePostEl(updated, profileStore.get()));
+          },
+        });
+      });
+      actions.appendChild(editorsBtn);
+    }
+  }
+
   wrap.appendChild(actions);
 
   return wrap;
+}
+
+function mountEditPostForm(host, post, onSaved) {
+  host.innerHTML = "";
+  const form = document.createElement("form");
+  form.className = "post-edit-form";
+
+  const ta = document.createElement("textarea");
+  ta.className = "input";
+  ta.value = post.content;
+  ta.required = true;
+  ta.maxLength = 1000;
+  form.appendChild(ta);
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "btn";
+  save.textContent = "Save changes";
+  actions.appendChild(save);
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "btn ghost";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => { host.innerHTML = ""; });
+  actions.appendChild(cancel);
+  form.appendChild(actions);
+
+  form.addEventListener("submit", ev => {
+    ev.preventDefault();
+    const text = ta.value.trim();
+    if (!text) return;
+    postStore.update(post.id, { content: text });
+    host.innerHTML = "";
+    onSaved && onSaved();
+  });
+
+  host.appendChild(form);
 }
 
 function mountCompose(host, opts) {
@@ -2639,6 +2762,7 @@ function mountCompose(host, opts) {
       groupId: groupId || target.value || null,
       createdAt: Date.now(),
       likes: [],
+      editors: [],
     };
     postStore.add(post);
     route();
@@ -2664,28 +2788,67 @@ function renderGroups() {
   newBtn.addEventListener("click", () => {
     if (!me) { location.hash = "#/profile"; return; }
     if (newHost.firstChild) { newHost.innerHTML = ""; return; }
-    newHost.appendChild(tpl("tpl-new-group"));
-    document.getElementById("ng-loc").value = me.location;
-    document.getElementById("ng-cancel").addEventListener("click", () => { newHost.innerHTML = ""; });
-    document.getElementById("new-group-form").addEventListener("submit", e => {
-      e.preventDefault();
-      const name = document.getElementById("ng-name").value.trim();
-      const loc = document.getElementById("ng-loc").value.trim();
-      const desc = document.getElementById("ng-desc").value.trim();
-      if (!name || !loc || !desc) return;
-      const g = {
-        id: uid("g"),
-        name, description: desc, location: loc,
-        createdBy: me.name,
-        createdAt: Date.now(),
-        members: [me.name],
-      };
-      groupStore.add(g);
-      location.hash = `#/groups/${g.id}`;
+    mountGroupForm(newHost, me, {
+      onCreated: g => { location.hash = `#/groups/${g.id}`; },
     });
   });
 
   paintGroups();
+}
+
+function mountGroupForm(host, me, opts) {
+  opts = opts || {};
+  const { onCreated, onSaved, edit } = opts;
+
+  host.innerHTML = "";
+  host.appendChild(tpl("tpl-new-group"));
+
+  const heading = document.getElementById("ng-heading");
+  const subnote = document.getElementById("ng-subnote");
+  const submitBtn = document.getElementById("ng-submit");
+  const nameInp = document.getElementById("ng-name");
+  const locInp = document.getElementById("ng-loc");
+  const descInp = document.getElementById("ng-desc");
+
+  if (edit) {
+    heading.textContent = "Edit group";
+    subnote.textContent = "Update the group's name, location, or description.";
+    submitBtn.textContent = "Save changes";
+    nameInp.value = edit.name;
+    locInp.value = edit.location;
+    descInp.value = edit.description;
+  } else {
+    locInp.value = me.location;
+  }
+
+  document.getElementById("ng-cancel").addEventListener("click", () => { host.innerHTML = ""; });
+
+  document.getElementById("new-group-form").addEventListener("submit", e => {
+    e.preventDefault();
+    const name = nameInp.value.trim();
+    const loc = locInp.value.trim();
+    const desc = descInp.value.trim();
+    if (!name || !loc || !desc) return;
+
+    if (edit) {
+      groupStore.update(edit.id, { name, location: loc, description: desc });
+      host.innerHTML = "";
+      onSaved && onSaved();
+      return;
+    }
+
+    const g = {
+      id: uid("g"),
+      name, description: desc, location: loc,
+      createdBy: me.name,
+      createdAt: Date.now(),
+      members: [me.name],
+      editors: [],
+    };
+    groupStore.add(g);
+    host.innerHTML = "";
+    onCreated && onCreated(g);
+  });
 }
 
 function paintGroups() {
@@ -2759,22 +2922,45 @@ function renderGroup(id) {
   setActiveNav("groups");
   view.innerHTML = "";
 
-  const g = groupStore.byId(id);
+  let g = groupStore.byId(id);
   if (!g) {
     view.innerHTML = "<p class='muted'>Group not found.</p>";
     return;
   }
   view.appendChild(tpl("tpl-group"));
-  document.getElementById("group-name").textContent = g.name;
-  document.getElementById("group-desc").textContent = g.description;
 
   const me = profileStore.get();
   const joinBtn = document.getElementById("group-join");
+  const editBtn = document.getElementById("group-edit");
+  const editHost = document.getElementById("group-edit-host");
+  const newEventBtn = document.getElementById("group-new-event");
+  const newEventHost = document.getElementById("group-new-event-host");
+  const editorsHost = document.getElementById("group-editors-host");
+  const tagsEl = document.getElementById("group-tags");
   const metaEl = document.getElementById("group-meta");
 
-  function paintMeta() {
+  function refreshGroup() {
+    const updated = groupStore.byId(g.id);
+    if (updated) g = updated;
+  }
+
+  function paintHeader() {
+    document.getElementById("group-name").textContent = g.name;
+    document.getElementById("group-desc").textContent = g.description;
     const count = (g.members || []).length;
-    metaEl.textContent = `${g.location} · ${count} member${count === 1 ? "" : "s"} · created by ${g.createdBy}`;
+    metaEl.textContent = `${g.location} · ${count} member${count === 1 ? "" : "s"}`;
+
+    tagsEl.innerHTML = "";
+    const creatorChip = document.createElement("span");
+    creatorChip.className = "creator-chip";
+    creatorChip.textContent = `Creator · ${g.createdBy}`;
+    tagsEl.appendChild(creatorChip);
+    (g.editors || []).forEach(name => {
+      const chip = document.createElement("span");
+      chip.className = "group-chip";
+      chip.textContent = `Editor · ${name}`;
+      tagsEl.appendChild(chip);
+    });
   }
 
   function syncJoin() {
@@ -2789,13 +2975,38 @@ function renderGroup(id) {
     joinBtn.classList.toggle("ghost", isMember);
     joinBtn.onclick = () => {
       groupStore.toggleMember(g.id, me.name);
-      const updated = groupStore.byId(g.id);
-      g.members = updated.members;
-      paintMeta();
-      syncJoin();
-      mountComposeArea();
+      refreshGroup();
+      paintAll();
     };
   }
+
+  function syncEditBtn() {
+    if (canEditGroup(g, me)) {
+      editBtn.classList.remove("hidden");
+      editBtn.onclick = () => {
+        if (editHost.firstChild) { editHost.innerHTML = ""; return; }
+        mountGroupForm(editHost, me, {
+          edit: g,
+          onSaved: () => { refreshGroup(); paintAll(); },
+        });
+      };
+    } else {
+      editBtn.classList.add("hidden");
+      editHost.innerHTML = "";
+    }
+  }
+
+  function syncNewEventBtn() {
+    const isMember = me && (g.members || []).includes(me.name);
+    newEventBtn.classList.toggle("hidden", !isMember);
+    if (!isMember) newEventHost.innerHTML = "";
+  }
+
+  newEventBtn.addEventListener("click", () => {
+    if (!me) { location.hash = "#/profile"; return; }
+    if (newEventHost.firstChild) { newEventHost.innerHTML = ""; return; }
+    mountNewEventForm(newEventHost, me, { group: g, onCreated: paintGroupEvents });
+  });
 
   function mountComposeArea() {
     const host = document.getElementById("compose-host");
@@ -2811,12 +3022,56 @@ function renderGroup(id) {
     mountCompose(host, { groupId: g.id });
   }
 
-  paintMeta();
-  syncJoin();
-  mountComposeArea();
+  function paintGroupEvents() {
+    const list = document.getElementById("group-events-list");
+    const empty = document.getElementById("group-events-empty");
+    list.innerHTML = "";
+    const events = eventStore.list()
+      .filter(ev => ev.groupId === g.id)
+      .sort((a, b) => b.createdAt - a.createdAt);
+    if (!events.length) {
+      empty.classList.remove("hidden");
+      return;
+    }
+    empty.classList.add("hidden");
+    events.forEach(ev => list.appendChild(makeEventCard(ev, me)));
+  }
 
-  const posts = postStore.list().filter(p => p.groupId === g.id);
-  paintFeed(document.getElementById("feed-list"), document.getElementById("feed-empty"), posts);
+  function paintEditors() {
+    editorsHost.innerHTML = "";
+    if (!me || me.name !== g.createdBy) return;
+    renderEditorsPanel(editorsHost, {
+      title: "Group co-editors",
+      subtitle: "Grant other group members permission to edit this group.",
+      creator: g.createdBy,
+      eligibleNames: g.members || [],
+      editors: g.editors || [],
+      emptyMessage: "No other members have joined yet.",
+      onChange: next => {
+        groupStore.update(g.id, { editors: next });
+        refreshGroup();
+        paintAll();
+      },
+    });
+  }
+
+  function paintPosts() {
+    const posts = postStore.list().filter(p => p.groupId === g.id);
+    paintFeed(document.getElementById("feed-list"), document.getElementById("feed-empty"), posts);
+  }
+
+  function paintAll() {
+    paintHeader();
+    syncJoin();
+    syncEditBtn();
+    syncNewEventBtn();
+    mountComposeArea();
+    paintGroupEvents();
+    paintEditors();
+    paintPosts();
+  }
+
+  paintAll();
 }
 
 // ---- Render: Events
@@ -2925,18 +3180,135 @@ function makeEventCard(e, me) {
   body.appendChild(desc);
 
   const foot = document.createElement("div");
-  foot.className = "event-foot muted";
-  foot.textContent = `Created by ${e.createdBy}`;
+  foot.className = "event-foot";
+  const creatorChip = document.createElement("span");
+  creatorChip.className = "creator-chip";
+  creatorChip.textContent = `Creator · ${e.createdBy}`;
+  foot.appendChild(creatorChip);
+  if (e.groupId) {
+    const g = groupStore.byId(e.groupId);
+    if (g) {
+      const groupChip = document.createElement("span");
+      groupChip.className = "group-chip";
+      groupChip.textContent = `Group · ${g.name}`;
+      foot.appendChild(groupChip);
+    }
+  }
   body.appendChild(foot);
 
   wrap.appendChild(body);
   return wrap;
 }
 
-function mountNewEventForm(host, me, onCreated) {
+function canEditEvent(e, me) {
+  if (!me || !e) return false;
+  if (e.createdBy === me.name) return true;
+  return (e.editors || []).includes(me.name);
+}
+
+function canEditGroup(g, me) {
+  if (!me || !g) return false;
+  if (g.createdBy === me.name) return true;
+  return (g.editors || []).includes(me.name);
+}
+
+function canEditPost(p, me) {
+  if (!me || !p) return false;
+  if (p.authorName === me.name) return true;
+  return (p.editors || []).includes(me.name);
+}
+
+// Renders a "Co-editors" panel into `host`. `opts` accepts:
+//   title            — heading text
+//   subtitle         — supporting line
+//   creator          — username of the creator (excluded from the list)
+//   eligibleNames    — array of usernames who can be granted edit
+//   editors          — array of currently-granted usernames
+//   emptyMessage     — shown when eligibleNames is empty
+//   onChange(next)   — called with the new editors array on grant/revoke
+function renderEditorsPanel(host, opts) {
+  host.innerHTML = "";
+  const {
+    title = "Co-editors",
+    subtitle,
+    creator,
+    eligibleNames = [],
+    editors = [],
+    emptyMessage = "No one is eligible to be granted edit yet.",
+    onChange,
+  } = opts;
+
+  const card = document.createElement("div");
+  card.className = "editors-card";
+
+  const heading = document.createElement("h3");
+  heading.className = "h2";
+  heading.textContent = title;
+  card.appendChild(heading);
+
+  if (subtitle) {
+    const sub = document.createElement("p");
+    sub.className = "muted";
+    sub.textContent = subtitle;
+    card.appendChild(sub);
+  }
+
+  const pool = eligibleNames.filter(n => n !== creator);
+  if (pool.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = emptyMessage;
+    card.appendChild(empty);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "editors-list";
+    pool.forEach(name => {
+      const li = document.createElement("li");
+      li.className = "editor-row";
+
+      const left = document.createElement("div");
+      left.className = "editor-name";
+      left.textContent = name;
+      if (editors.includes(name)) {
+        const badge = document.createElement("span");
+        badge.className = "editor-chip";
+        badge.textContent = "Editor";
+        left.appendChild(badge);
+      }
+      li.appendChild(left);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn ghost";
+      const isEditor = editors.includes(name);
+      btn.textContent = isEditor ? "Revoke" : "Grant edit";
+      btn.addEventListener("click", () => {
+        const next = editors.slice();
+        const i = next.indexOf(name);
+        if (i >= 0) next.splice(i, 1); else next.push(name);
+        onChange && onChange(next);
+      });
+      li.appendChild(btn);
+
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+  }
+
+  host.appendChild(card);
+}
+
+function mountNewEventForm(host, me, opts) {
+  // Back-compat: callers used to pass `onCreated` as the third arg.
+  if (typeof opts === "function") opts = { onCreated: opts };
+  opts = opts || {};
+  const { onCreated, group, edit } = opts;
+
   host.innerHTML = "";
   host.appendChild(tpl("tpl-new-event"));
 
+  const heading = document.getElementById("ne-heading");
+  const scopeNote = document.getElementById("ne-group-scope");
   const titleInp = document.getElementById("ne-title");
   const locInp = document.getElementById("ne-loc");
   const maxInp = document.getElementById("ne-max");
@@ -2944,9 +3316,39 @@ function mountNewEventForm(host, me, onCreated) {
   const photosInp = document.getElementById("ne-photos");
   const preview = document.getElementById("ne-photo-preview");
   const note = document.getElementById("ne-verify-note");
-  locInp.value = me.location;
+  const submitBtn = document.getElementById("ne-submit");
 
   let photoData = [];
+
+  if (edit) {
+    heading.textContent = "Edit event";
+    submitBtn.textContent = "Save changes";
+    titleInp.value = edit.title;
+    locInp.value = edit.location;
+    maxInp.value = edit.maxPeople;
+    descInp.value = edit.description;
+    photoData = (edit.photos || []).slice();
+    photoData.forEach(src => {
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = "";
+      preview.appendChild(img);
+    });
+    if (edit.groupId) {
+      const g = groupStore.byId(edit.groupId);
+      if (g) {
+        scopeNote.classList.remove("hidden");
+        scopeNote.textContent = `Scoped to group: ${g.name}`;
+      }
+    }
+  } else if (group) {
+    heading.textContent = `Create an event for ${group.name}`;
+    scopeNote.classList.remove("hidden");
+    scopeNote.textContent = `This event will be linked to the ${group.name} group.`;
+    locInp.value = group.location;
+  } else {
+    locInp.value = me.location;
+  }
 
   function refreshNote() {
     const t = titleInp.value.trim();
@@ -2957,8 +3359,12 @@ function mountNewEventForm(host, me, onCreated) {
       note.textContent = "New events need to be verified by a moderator before they go live. Reusing a previously verified title and location will publish instantly.";
     }
   }
-  titleInp.addEventListener("input", refreshNote);
-  locInp.addEventListener("input", refreshNote);
+  if (!edit) {
+    titleInp.addEventListener("input", refreshNote);
+    locInp.addEventListener("input", refreshNote);
+  } else {
+    note.classList.add("hidden");
+  }
 
   photosInp.addEventListener("change", async () => {
     const files = Array.from(photosInp.files || []).slice(0, 3);
@@ -2988,6 +3394,24 @@ function mountNewEventForm(host, me, onCreated) {
     const desc = descInp.value.trim();
     if (!title || !loc || !desc || !max) return;
 
+    if (edit) {
+      try {
+        eventStore.update(edit.id, {
+          title,
+          location: loc,
+          maxPeople: max,
+          description: desc,
+          photos: photoData.slice(),
+        });
+      } catch (err) {
+        alert("Couldn't save — your photos may be too large for browser storage. Try fewer or smaller images.");
+        return;
+      }
+      host.innerHTML = "";
+      onCreated && onCreated();
+      return;
+    }
+
     const preVerified = verifiedTemplateStore.has(title, loc);
     const event = {
       id: uid("e"),
@@ -3000,6 +3424,8 @@ function mountNewEventForm(host, me, onCreated) {
       createdAt: Date.now(),
       verified: preVerified,
       attendees: [me.name],
+      editors: [],
+      groupId: group ? group.id : null,
     };
     try {
       eventStore.add(event);
@@ -3008,12 +3434,8 @@ function mountNewEventForm(host, me, onCreated) {
       return;
     }
     host.innerHTML = "";
-    if (preVerified) {
-      location.hash = `#/events/${event.id}`;
-    } else {
-      onCreated && onCreated();
-      location.hash = `#/events/${event.id}`;
-    }
+    onCreated && onCreated();
+    location.hash = `#/events/${event.id}`;
   });
 }
 
@@ -3032,11 +3454,38 @@ function renderEvent(id) {
 
   function paint() {
     e = eventStore.byId(id);
+
+    const backLink = document.getElementById("event-back");
+    if (e.groupId && groupStore.byId(e.groupId)) {
+      backLink.href = `#/groups/${e.groupId}`;
+      backLink.textContent = "← Back to group";
+    } else {
+      backLink.href = "#/events";
+      backLink.textContent = "← All events";
+    }
+
     document.getElementById("event-title").textContent = e.title;
     const count = (e.attendees || []).length;
     document.getElementById("event-meta").textContent =
-      `${e.location} · created by ${e.createdBy} · ${relTime(e.createdAt)}`;
+      `${e.location} · ${relTime(e.createdAt)}`;
     document.getElementById("event-desc").textContent = e.description;
+
+    const tagsEl = document.getElementById("event-tags");
+    tagsEl.innerHTML = "";
+    const creatorChip = document.createElement("span");
+    creatorChip.className = "creator-chip";
+    creatorChip.textContent = `Creator · ${e.createdBy}`;
+    tagsEl.appendChild(creatorChip);
+    if (e.groupId) {
+      const g = groupStore.byId(e.groupId);
+      if (g) {
+        const groupChip = document.createElement("a");
+        groupChip.className = "group-chip";
+        groupChip.href = `#/groups/${g.id}`;
+        groupChip.textContent = `Group · ${g.name}`;
+        tagsEl.appendChild(groupChip);
+      }
+    }
 
     const status = document.getElementById("event-status");
     status.textContent = e.verified ? "Verified" : "Awaiting verification";
@@ -3044,6 +3493,7 @@ function renderEvent(id) {
 
     const photosEl = document.getElementById("event-photos");
     photosEl.innerHTML = "";
+    photosEl.classList.remove("hidden");
     if (e.photos && e.photos.length) {
       e.photos.forEach(src => {
         const img = document.createElement("img");
@@ -3061,6 +3511,19 @@ function renderEvent(id) {
     const pct = Math.min(100, (count / e.maxPeople) * 100);
     fill.style.width = `${pct}%`;
     label.textContent = `${count} / ${e.maxPeople} attending`;
+
+    const editBtn = document.getElementById("event-edit");
+    const editHost = document.getElementById("event-edit-host");
+    if (canEditEvent(e, me)) {
+      editBtn.classList.remove("hidden");
+      editBtn.onclick = () => {
+        if (editHost.firstChild) { editHost.innerHTML = ""; return; }
+        mountNewEventForm(editHost, me, { edit: e, onCreated: paint });
+      };
+    } else {
+      editBtn.classList.add("hidden");
+      editHost.innerHTML = "";
+    }
 
     const rsvpBtn = document.getElementById("event-rsvp");
     if (!me) {
@@ -3113,13 +3576,59 @@ function renderEvent(id) {
       card.appendChild(btn);
       verifyHost.appendChild(card);
     }
+
+    paintEditors();
+  }
+
+  function paintEditors() {
+    const host = document.getElementById("event-editors-host");
+    host.innerHTML = "";
+    if (!me || me.name !== e.createdBy) return;
+    renderEditorsPanel(host, {
+      title: "Co-editors",
+      subtitle: "Grant other RSVP'd attendees permission to edit this event.",
+      creator: e.createdBy,
+      eligibleNames: e.attendees || [],
+      editors: e.editors || [],
+      emptyMessage: "No one else has RSVP'd yet.",
+      onChange: next => {
+        eventStore.update(e.id, { editors: next });
+        paint();
+      },
+    });
   }
 
   paint();
 }
 
 // ---- Trades feature
+function sharedGroupsBetween(meName, otherName) {
+  if (!meName || !otherName) return [];
+  return groupStore.list().filter(g => {
+    const members = g.members || [];
+    return members.includes(meName) && members.includes(otherName);
+  });
+}
+
+function compareTradeMatches(a, b, me) {
+  // 1. Same group as me beats no shared group.
+  const aShared = sharedGroupsBetween(me.name, a.user.name).length;
+  const bShared = sharedGroupsBetween(me.name, b.user.name).length;
+  if (aShared !== bShared) return bShared - aShared;
+  // 2. Same location as me.
+  const local = (me.location || "").toLowerCase();
+  const al = a.user.location.toLowerCase() === local ? 0 : 1;
+  const bl = b.user.location.toLowerCase() === local ? 0 : 1;
+  if (al !== bl) return al - bl;
+  // 3. Larger total overlap (cards we mutually want) wins.
+  return (b.theyHaveIWant.length + b.iHaveTheyWant.length) -
+         (a.theyHaveIWant.length + a.iHaveTheyWant.length);
+}
+
 function buildTradeMatches(_me) {
+  // Match generation is currently a stub. When match sources are wired
+  // back up, they should be sorted with compareTradeMatches so that
+  // shared-group collectors come first.
   return [];
 }
 
@@ -3150,7 +3659,7 @@ function renderTrades() {
     return;
   }
 
-  ctx.textContent = `Matched by your collection and wishlist · prioritized near ${me.location}.`;
+  ctx.textContent = `Matched by your collection and wishlist · prioritized for shared groups, then near ${me.location}.`;
 
   const myTrades = tradeStore.forUser(me.name);
   paintActiveTrades(myTrades, me);
@@ -3259,14 +3768,19 @@ function paintTradeMatches(matches, me) {
   }
   sec.classList.remove("hidden");
   const localCount = matches.filter(m => m.user.location.toLowerCase() === me.location.toLowerCase()).length;
-  meta.textContent = `${matches.length} collector${matches.length === 1 ? "" : "s"} ready to trade${localCount ? ` · ${localCount} near ${me.location}` : ""}.`;
+  const groupCount = matches.filter(m => sharedGroupsBetween(me.name, m.user.name).length > 0).length;
+  const parts = [`${matches.length} collector${matches.length === 1 ? "" : "s"} ready to trade`];
+  if (groupCount) parts.push(`${groupCount} in your groups`);
+  if (localCount) parts.push(`${localCount} near ${me.location}`);
+  meta.textContent = parts.join(" · ") + ".";
   matches.forEach(m => host.appendChild(makeMatchCard(m, me)));
 }
 
 function makeMatchCard(match, me) {
   const isLocal = match.user.location.toLowerCase() === me.location.toLowerCase();
+  const shared = sharedGroupsBetween(me.name, match.user.name);
   const wrap = document.createElement("article");
-  wrap.className = `match-card${isLocal ? " match-local" : ""}`;
+  wrap.className = `match-card${isLocal ? " match-local" : ""}${shared.length ? " match-shared-group" : ""}`;
 
   const head = document.createElement("header");
   head.className = "match-head";
@@ -3282,6 +3796,13 @@ function makeMatchCard(match, me) {
   const nm = document.createElement("strong");
   nm.textContent = match.user.name;
   nameRow.appendChild(nm);
+  shared.forEach(g => {
+    const chip = document.createElement("a");
+    chip.className = "group-chip";
+    chip.href = `#/groups/${g.id}`;
+    chip.textContent = `Group · ${g.name}`;
+    nameRow.appendChild(chip);
+  });
   if (isLocal) {
     const b = document.createElement("span");
     b.className = "badge-local";
