@@ -117,7 +117,17 @@
       "Bash(grep -n \"JP_CARD_SUFFIXES\\\\|translateJpCardName\\\\|compactJpCard\\\\|renderJapaneseSet\\\\|^// ---- Japanese set detail\\\\|^// ---- Detail$\" /Users/shivankahuja/Desktop/CardKave/app.js)",
       "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d status)",
       "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d checkout -- .claude/launch.json)",
-      "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d add app.js index.html .claude/settings.local.json SETUP_FIREBASE.md cloud-sync.js firebase-config.js firestore.rules)"
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave/.claude/worktrees/xenodochial-fermi-ea8e5d add app.js index.html .claude/settings.local.json SETUP_FIREBASE.md cloud-sync.js firebase-config.js firestore.rules)",
+      "Bash(git add *)",
+      "Bash(gh pr *)",
+      "Bash(git commit -m ' *)",
+      "Bash(firebase --version)",
+      "Bash(npx -y firebase-tools --version)",
+      "Bash(npx -y firebase-tools projects:list)",
+      "Read(//private/tmp/**)",
+      "Bash(npm install *)",
+      "Bash(/tmp/node_modules/.bin/firebase --version)",
+      "Bash(/tmp/node_modules/.bin/firebase projects:list)"
     ]
   }
 }

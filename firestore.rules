@@ -36,5 +36,14 @@ service cloud.firestore {
     match /trades/{tradeId}                  { allow read, write: if request.auth != null; }
     match /decks/{deckId}                    { allow read, write: if request.auth != null; }
     match /verifiedEventTemplates/{tplId}    { allow read, write: if request.auth != null; }
+
+    // ── Public trade profiles ───────────────────────────────────────
+    // Doc ID is the owning user's uid. Anyone signed-in can read every
+    // profile so the trades page can compute matches. Only the owner
+    // can write their own doc.
+    match /tradeProfiles/{uid} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
   }
 }
