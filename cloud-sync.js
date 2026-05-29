@@ -56,6 +56,13 @@
     "verified-event-templates": { col: "verifiedEventTemplates", primitive: true },
   };
 
+  // Public trade profiles — each user owns the doc keyed by their uid.
+  // Anyone signed in can read every profile (so we can compute matches),
+  // but only the owner can write their own. Read-only here; writes go
+  // through pushMyTradeProfile() after collection/wishlist/profile edits.
+  const TRADE_PROFILE_COL = "tradeProfiles";
+  const TRADE_PROFILE_KEY = "trade-profiles";
+
   // ─── State ───────────────────────────────────────────────────────────
   let currentUid = null;
   // Snapshot of last-known-cloud state for shared collections, so saves
@@ -106,6 +113,11 @@
       // Clear any per-user keys from localStorage so signing in as a
       // different user on the same device doesn't leak stale data.
       Object.keys(PER_USER).forEach(k => localStorage.removeItem(k));
+      // Trade profiles is shared/public, but it includes other users'
+      // data scoped to the prior session — clear it so a new sign-in
+      // re-hydrates cleanly.
+      localStorage.removeItem(TRADE_PROFILE_KEY);
+      if (tradeProfileTimer) { clearTimeout(tradeProfileTimer); tradeProfileTimer = null; }
       if (!firstAuthStateResolved) { firstAuthStateResolved = true; resolveReady(); }
       emit({ reason: "signout" });
       return;
@@ -116,6 +128,9 @@
     try {
       await hydratePerUser(user);
       subscribeShared();
+      subscribeTradeProfiles();
+      // Refresh our public trade profile from whatever local state we just hydrated.
+      pushMyTradeProfile();
       if (!firstAuthStateResolved) { firstAuthStateResolved = true; resolveReady(); }
       emit({ reason: "signin" });
     } catch (e) {
@@ -208,7 +223,15 @@
   // ─── Write-through: called from store.save() in app.js ───────────────
   function push(key, value) {
     if (!currentUid) return;
-    if (PER_USER[key]) return pushPerUser(key, value);
+    if (PER_USER[key]) {
+      pushPerUser(key, value);
+      // Anything that changes our public-facing trade data must re-publish
+      // the trade profile so other clients see fresh matches.
+      if (key === "collection-cards" || key === "wishlist-cards" || key === "user-profile") {
+        pushMyTradeProfile();
+      }
+      return;
+    }
     if (SHARED[key])   return pushSharedDiff(key, value, SHARED[key]);
   }
 
@@ -326,6 +349,52 @@
     const snap = await ref.get();
     if (snap.exists) localStorage.setItem("user-profile", JSON.stringify(snap.data()));
     return snap.exists ? snap.data() : null;
+  }
+
+  // ─── Public trade profiles ───────────────────────────────────────────
+  // Subscribe to every user's trade profile so the Trades page can compute
+  // matches locally. The current user's own profile is included; app.js
+  // filters it out by uid before matching.
+  function subscribeTradeProfiles() {
+    const ref = db.collection(TRADE_PROFILE_COL);
+    const unsub = ref.onSnapshot(snap => {
+      const items = [];
+      snap.forEach(d => items.push({ ...d.data(), uid: d.id }));
+      localStorage.setItem(TRADE_PROFILE_KEY, JSON.stringify(items));
+      emit({ reason: "shared-update", key: TRADE_PROFILE_KEY });
+    }, err => console.warn("[cloudSync] tradeProfiles listener error:", err));
+    subs.push(unsub);
+  }
+
+  function buildMyTradeProfile() {
+    const profile = safeParse(localStorage.getItem("user-profile")) || {};
+    const coll = safeParse(localStorage.getItem("collection-cards")) || [];
+    const wish = safeParse(localStorage.getItem("wishlist-cards")) || [];
+    return {
+      name: String(profile.name || "").trim(),
+      location: String(profile.location || "").trim(),
+      avatarColor: profile.avatarColor || "",
+      initials: profile.initials || "",
+      collection: Array.isArray(coll) ? coll : [],
+      wishlist:   Array.isArray(wish) ? wish : [],
+      updatedAt: Date.now(),
+    };
+  }
+
+  // Debounce so a burst of qty +/- clicks only writes once.
+  let tradeProfileTimer = null;
+  function pushMyTradeProfile() {
+    if (!currentUid) return;
+    if (tradeProfileTimer) clearTimeout(tradeProfileTimer);
+    tradeProfileTimer = setTimeout(() => {
+      tradeProfileTimer = null;
+      if (!currentUid) return;
+      const profile = buildMyTradeProfile();
+      if (!profile.name) return; // wait until profile is set up
+      db.collection(TRADE_PROFILE_COL).doc(currentUid)
+        .set(profile)
+        .catch(err => console.warn("[cloudSync] pushMyTradeProfile failed:", err));
+    }, 600);
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────

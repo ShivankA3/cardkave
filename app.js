@@ -164,7 +164,12 @@ function refreshCounts() {
     if (me) {
       try {
         const trades = JSON.parse(localStorage.getItem("trades")) || [];
-        count = trades.filter(t => (t.fromUserName === me.name || t.toUserName === me.name) && t.status === "proposed").length;
+        const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+        count = trades.filter(t => {
+          if (t.status !== "proposed") return false;
+          if (myUid && (t.fromUserUid === myUid || t.toUserUid === myUid)) return true;
+          return t.fromUserName === me.name || t.toUserName === me.name;
+        }).length;
       } catch {}
     }
     tradesEl.textContent = count;
@@ -1620,9 +1625,13 @@ const tradeStore = {
     this.save(arr);
     return arr[i];
   },
-  forUser(name) {
-    if (!name) return [];
-    return this.list().filter(t => t.fromUserName === name || t.toUserName === name);
+  forUser(name, uid) {
+    if (!name && !uid) return [];
+    return this.list().filter(t => {
+      if (uid && (t.fromUserUid === uid || t.toUserUid === uid)) return true;
+      if (name && (t.fromUserName === name || t.toUserName === name)) return true;
+      return false;
+    });
   },
 };
 
@@ -3625,20 +3634,76 @@ function compareTradeMatches(a, b, me) {
          (a.theyHaveIWant.length + a.iHaveTheyWant.length);
 }
 
-function buildTradeMatches(_me) {
-  // Match generation is currently a stub. When match sources are wired
-  // back up, they should be sorted with compareTradeMatches so that
-  // shared-group collectors come first.
-  return [];
+// Read all public trade profiles synced from cloud, intersect with the
+// current user's collection/wishlist, and return one match per other user
+// where there's a viable two-sided swap. Sorted with compareTradeMatches
+// (shared group → same location → biggest overlap).
+function buildTradeMatches(me) {
+  if (!me) return [];
+
+  let profiles;
+  try { profiles = JSON.parse(localStorage.getItem("trade-profiles")) || []; }
+  catch { profiles = []; }
+  if (!Array.isArray(profiles) || !profiles.length) return [];
+
+  const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  const myColl = collectionCards.list();
+  const myWishIds = new Set(wishlistCards.list().map(c => c.id));
+
+  const matches = [];
+  for (const p of profiles) {
+    if (!p || !p.name) continue;
+    if (myUid && p.uid && p.uid === myUid) continue;
+    if (!myUid && p.name === me.name) continue;
+
+    const theirColl = Array.isArray(p.collection) ? p.collection : [];
+    const theirWish = Array.isArray(p.wishlist)   ? p.wishlist   : [];
+    if (!theirColl.length && !theirWish.length) continue;
+
+    const theirWishIds = new Set(theirWish.map(c => c.id));
+    const theyHaveIWant = theirColl.filter(c => c && myWishIds.has(c.id));
+    const iHaveTheyWant = myColl.filter(c => c && theirWishIds.has(c.id));
+
+    // A trade requires both directions to be satisfiable — otherwise the
+    // propose form can't render an option for one of the radio groups.
+    if (!theyHaveIWant.length || !iHaveTheyWant.length) continue;
+
+    matches.push({
+      user: {
+        uid: p.uid || null,
+        name: p.name,
+        location: p.location || "",
+        avatarColor: p.avatarColor || "",
+        initials: p.initials || "",
+      },
+      theyHaveIWant,
+      iHaveTheyWant,
+    });
+  }
+
+  matches.sort((a, b) => compareTradeMatches(a, b, me));
+  return matches;
 }
 
 function statusLabel(s) {
   return { proposed: "Proposed", accepted: "Accepted", declined: "Declined" }[s] || s;
 }
 
+// True when `me` is the user identified by (name, uid). Prefer uid because
+// it survives display-name changes; fall back to name for legacy trades
+// created before we stored uids.
+function userIsParty(me, name, uid) {
+  if (!me) return false;
+  const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  if (myUid && uid && myUid === uid) return true;
+  return !!name && name === me.name;
+}
+
 function tradeOtherParty(trade, me) {
   if (!me) return { name: trade.toUserName, location: trade.toUserLocation };
-  if (trade.fromUserName === me.name) return { name: trade.toUserName, location: trade.toUserLocation };
+  if (userIsParty(me, trade.fromUserName, trade.fromUserUid)) {
+    return { name: trade.toUserName, location: trade.toUserLocation };
+  }
   return { name: trade.fromUserName, location: trade.fromUserLocation };
 }
 
@@ -3661,7 +3726,8 @@ function renderTrades() {
 
   ctx.textContent = `Matched by your collection and wishlist · prioritized for shared groups, then near ${me.location}.`;
 
-  const myTrades = tradeStore.forUser(me.name);
+  const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  const myTrades = tradeStore.forUser(me.name, myUid);
   paintActiveTrades(myTrades, me);
 
   const matches = buildTradeMatches(me);
@@ -3701,7 +3767,7 @@ function paintActiveTrades(trades, me) {
 }
 
 function makeActiveTradeRow(t, me) {
-  const isFromUser = t.fromUserName === me.name;
+  const isFromUser = userIsParty(me, t.fromUserName, t.fromUserUid);
   const other = tradeOtherParty(t, me);
   const give = isFromUser ? t.fromCard : t.toCard;
   const get  = isFromUser ? t.toCard   : t.fromCard;
@@ -3786,7 +3852,7 @@ function makeMatchCard(match, me) {
   head.className = "match-head";
   const av = document.createElement("span");
   av.className = "avatar";
-  av.textContent = initials(match.user.name);
+  paintAvatar(av, { name: match.user.name, avatarColor: match.user.avatarColor, initials: match.user.initials });
   head.appendChild(av);
 
   const meta = document.createElement("div");
@@ -3827,7 +3893,8 @@ function makeMatchCard(match, me) {
   foot.className = "match-foot";
   const cta = document.createElement("a");
   cta.className = "btn";
-  cta.href = `#/trades/new/${encodeURIComponent(match.user.name)}`;
+  const key = match.user.uid || match.user.name;
+  cta.href = `#/trades/new/${encodeURIComponent(key)}`;
   cta.textContent = "Propose trade";
   foot.appendChild(cta);
   wrap.appendChild(foot);
@@ -3868,7 +3935,9 @@ function makeMatchSide(title, cards) {
 }
 
 // ---- Render: Propose trade
-function renderProposeTrade(otherUserName) {
+// `key` is either the other user's uid (preferred — survives renames) or
+// their display name (back-compat for older URLs).
+function renderProposeTrade(key) {
   setActiveNav("trades");
   view.innerHTML = "";
 
@@ -3876,9 +3945,9 @@ function renderProposeTrade(otherUserName) {
   if (!me) { location.hash = "#/profile"; return; }
 
   const matches = buildTradeMatches(me);
-  const match = matches.find(m => m.user.name === otherUserName);
+  const match = matches.find(m => m.user.uid === key) || matches.find(m => m.user.name === key);
   if (!match) {
-    view.innerHTML = `<section class="stack"><a class="back" href="#/trades">&larr; All trades</a><p class="muted">No active match with ${otherUserName}. Add more cards to your collection or wishlist to discover trades.</p></section>`;
+    view.innerHTML = `<section class="stack"><a class="back" href="#/trades">&larr; All trades</a><p class="muted">No active match with ${key}. Add more cards to your collection or wishlist to discover trades.</p></section>`;
     return;
   }
 
@@ -3905,8 +3974,10 @@ function renderProposeTrade(otherUserName) {
     const trade = {
       id: uid("t"),
       fromUserName: me.name,
+      fromUserUid: (window.cloudSync && window.cloudSync.currentUid) || null,
       fromUserLocation: me.location,
       toUserName: match.user.name,
+      toUserUid: match.user.uid || null,
       toUserLocation: match.user.location,
       fromCard: snapshotCard(fromCard),
       toCard: snapshotCard(toCard),
@@ -3969,8 +4040,9 @@ function paintTradeDetail(id) {
   const trade = tradeStore.byId(id);
   if (!trade) return;
   const me = profileStore.get();
-  const isParticipant = !!(me && (trade.fromUserName === me.name || trade.toUserName === me.name));
-  const isFromUser = me && trade.fromUserName === me.name;
+  const isFromUser = userIsParty(me, trade.fromUserName, trade.fromUserUid);
+  const isToUser   = userIsParty(me, trade.toUserName,   trade.toUserUid);
+  const isParticipant = isFromUser || isToUser;
   const other = tradeOtherParty(trade, me);
   const isLocal = me?.location && other.location && other.location.toLowerCase() === me.location.toLowerCase();
 
