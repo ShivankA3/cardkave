@@ -127,7 +127,32 @@
       "Read(//private/tmp/**)",
       "Bash(npm install *)",
       "Bash(/tmp/node_modules/.bin/firebase --version)",
-      "Bash(/tmp/node_modules/.bin/firebase projects:list)"
+      "Bash(/tmp/node_modules/.bin/firebase projects:list)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave remote -v)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave branch -a)",
+      "Bash(ls /Users/shivankahuja/Desktop/ | head -20)",
+      "Bash(mkdir -p /Users/shivankahuja/Desktop/cardkave-landing)",
+      "Bash(dig +short cardkave.com A)",
+      "Bash(dig +short www.cardkave.com CNAME)",
+      "Bash(dig +short www.cardkave.com A)",
+      "Bash(dig +short app.cardkave.com)",
+      "Bash(curl -sI https://cardkave.com)",
+      "Bash(curl -sI https://www.cardkave.com)",
+      "Bash(dig +short cardkave.com NS)",
+      "Bash(dig +short SOA cardkave.com)",
+      "Bash(curl -sL https://cardkave.com)",
+      "Bash(curl -sI https://app.cardkave.com)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave status)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave diff .claude/launch.json)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave diff .claude/settings.local.json)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave log main..HEAD --oneline)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave diff main..HEAD --stat)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave fetch origin --quiet)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave log origin/main..HEAD --oneline)",
+      "Bash(git -C /Users/shivankahuja/Desktop/CardKave diff origin/main..HEAD --stat)",
+      "Bash(git stash *)",
+      "Bash(git pull *)",
+      "Bash(git push *)"
     ]
   }
 }

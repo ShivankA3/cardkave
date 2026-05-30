@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["-y", "http-server", "/Users/shivankahuja/Desktop/CardKave", "-p", "8765", "-c-1", "--silent"],
       "port": 8765
+    },
+    {
+      "name": "cardkave-landing",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "/Users/shivankahuja/Desktop/cardkave-landing", "-p", "8766", "-c-1", "--silent"],
+      "port": 8766
     }
   ]
 }
