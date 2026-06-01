@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://images.pokemontcg.io" crossorigin />
 <link rel="dns-prefetch" href="https://images.pokemontcg.io" />
-<link rel="stylesheet" href="styles.css?v=33" />
+<link rel="stylesheet" href="styles.css?v=34" />
 </head>
 <body>
   <header class="topbar">
@@ -75,6 +75,16 @@
         <div class="set-info">
           <h1 id="set-name" class="h1"></h1>
           <p id="set-meta" class="muted mono"></p>
+          <div id="set-completion" class="set-completion hidden">
+            <div class="set-completion-text">
+              <span class="set-completion-label">Collected</span>
+              <span class="set-completion-count" id="set-completion-count">0 / 0</span>
+              <span class="set-completion-percent" id="set-completion-percent">0%</span>
+            </div>
+            <div class="set-completion-bar" aria-hidden="true">
+              <div class="set-completion-bar-fill" id="set-completion-fill"></div>
+            </div>
+          </div>
         </div>
       </div>
       <div id="set-status" class="muted">Loading cards…</div>
@@ -136,6 +146,10 @@
               <button class="qty-btn" id="modal-wish-plus" type="button" aria-label="Add one to wishlist">+</button>
             </div>
           </div>
+        </div>
+        <div class="modal-lists" id="modal-lists">
+          <span class="modal-lists-label">Add to list</span>
+          <div class="modal-lists-chips" id="modal-lists-chips"></div>
         </div>
         <dl class="meta">
           <div><dt>Set</dt><dd id="modal-set"></dd></div>
@@ -342,12 +356,6 @@
             </svg>
             <span>Continue with Google</span>
           </button>
-          <button type="button" class="btn-provider btn-apple" id="login-apple">
-            <svg class="provider-icon" viewBox="0 0 16 18" aria-hidden="true">
-              <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
-            </svg>
-            <span>Continue with Apple</span>
-          </button>
         </div>
 
         <div class="auth-divider"><span>or</span></div>
@@ -393,12 +401,6 @@
             </svg>
             <span>Sign up with Google</span>
           </button>
-          <button type="button" class="btn-provider btn-apple" id="signup-apple">
-            <svg class="provider-icon" viewBox="0 0 16 18" aria-hidden="true">
-              <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
-            </svg>
-            <span>Sign up with Apple</span>
-          </button>
         </div>
 
         <div class="auth-divider"><span>or</span></div>
@@ -432,6 +434,32 @@
         </form>
 
         <p class="auth-foot">Already have an account? <a class="link" href="#/login">Sign in</a></p>
+      </div>
+    </section>
+  </template>
+
+  <template id="tpl-complete-signup">
+    <section class="auth-page">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">CardKave</span>
+        </div>
+        <h1 class="auth-title">Finish your account</h1>
+        <p class="auth-sub">Signed in with Google as <strong id="complete-email"></strong>. Add a few details to get started.</p>
+
+        <form id="complete-signup-form" class="auth-form" novalidate>
+          <label class="field">
+            <span class="field-label">Display name</span>
+            <input id="complete-name" class="input" required maxlength="40" autocomplete="name" placeholder="How you'll appear to others" />
+          </label>
+          <label class="field">
+            <span class="field-label">City or area</span>
+            <input id="complete-location" class="input" required maxlength="60" autocomplete="address-level2" placeholder="e.g. Brooklyn, NY" />
+          </label>
+          <p id="complete-error" class="auth-error hidden" role="alert"></p>
+          <button class="btn auth-submit" type="submit" id="complete-submit">Continue</button>
+        </form>
       </div>
     </section>
   </template>
@@ -471,35 +499,6 @@
           </div>
         </form>
         <p class="oauth-google-legal">To continue, Google will share your name, email address, language preference, and profile picture with cardkave.app.</p>
-      </div>
-    </div>
-  </template>
-
-  <template id="tpl-oauth-apple">
-    <div class="oauth-apple">
-      <div class="oauth-apple-head">
-        <svg class="oauth-apple-logo" viewBox="0 0 16 18" aria-hidden="true">
-          <path fill="currentColor" d="M13.0625 9.65625c-.0234-2.3438 1.9141-3.4688 2.0078-3.5313-1.0937-1.6015-2.7969-1.8203-3.4063-1.8437-1.4453-.1485-2.8281.8515-3.5625.8515-.7421 0-1.875-.8359-3.0859-.8125-1.586.0234-3.0469.9219-3.8594 2.3438-1.6485 2.8593-.4219 7.082 1.1875 9.4062.7891 1.1485 1.7187 2.4297 2.9297 2.3828 1.1875-.0469 1.6328-.7578 3.0625-.7578s1.8359.7578 3.086.7344c1.2734-.0234 2.0781-1.164 2.8516-2.3203.8984-1.328 1.2656-2.625 1.2812-2.6953-.0234-.0156-2.4609-.9453-2.4922-3.7578zM10.7344 2.625c.6562-.7969 1.0937-1.8984.9765-3.0078-.9375.0391-2.0703.625-2.75 1.4219-.6094.7031-1.1406 1.8281-1 2.9219 1.0469.0781 2.1172-.5469 2.7735-1.336z"/>
-        </svg>
-        <button type="button" class="oauth-close" id="oauth-close-apple" aria-label="Close">×</button>
-      </div>
-      <div class="oauth-apple-body">
-        <h2 class="oauth-apple-h">Use your Apple ID to sign in to CardKave.</h2>
-        <form id="oauth-apple-form">
-          <label class="field">
-            <span class="field-label">Apple ID</span>
-            <input class="input" type="email" id="oauth-apple-email" required placeholder="name@icloud.com" />
-          </label>
-          <label class="field">
-            <span class="field-label">Full name</span>
-            <input class="input" type="text" id="oauth-apple-name" required maxlength="40" placeholder="Your name" />
-          </label>
-          <label class="check oauth-apple-check">
-            <input type="checkbox" id="oauth-apple-hide" checked />
-            <span>Hide My Email <span class="muted">— Apple will create a relay address.</span></span>
-          </label>
-          <button type="submit" class="btn-apple-continue">Continue with Apple</button>
-        </form>
       </div>
     </div>
   </template>
@@ -827,14 +826,13 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script type="text/javascript" src="https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js" async defer></script>
   <!-- Firebase compat SDKs — load before firebase-config.js + cloud-sync.js + app.js. -->
   <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js" defer></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js" defer></script>
   <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" defer></script>
   <script src="firebase-config.js?v=1" defer></script>
-  <script src="cloud-sync.js?v=2" defer></script>
-  <script src="app.js?v=51" defer></script>
+  <script src="cloud-sync.js?v=3" defer></script>
+  <script src="app.js?v=52" defer></script>
 </body>
 </html>

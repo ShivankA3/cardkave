@@ -1,8 +1,8 @@
 // CardKave — minimalist Pokémon companion
 
 // ---- OAuth configuration ----
-// Fill in real client IDs here to enable production sign-in with Google/Apple.
-// While these are empty strings, the buttons fall back to the demo simulator.
+// Fill in a real client ID here to enable production sign-in with Google.
+// While this is an empty string, the button falls back to the demo simulator.
 //
 // Google: register at https://console.cloud.google.com/apis/credentials
 //   Create an OAuth 2.0 Client ID of type "Web application".
@@ -11,21 +11,9 @@
 //     - https://cardkave.com       (apex, redirected to www but include anyway)
 //     - http://localhost:8765      (local dev with `npx http-server`)
 //   No redirect URI needed for the token-client popup flow.
-//
-// Apple: register at https://developer.apple.com/account/resources/identifiers/list/serviceId
-//   Create a Services ID, enable "Sign in with Apple", and add this
-//   site's domain (cardkave.com) plus a return URL:
-//     - Domain:     cardkave.com
-//     - Return URL: https://www.cardkave.com/
-//   Apple does NOT allow http://localhost; the popup flow only works on
-//   the live HTTPS domain.
 const OAUTH_CONFIG = {
   google: {
     clientId: "", // e.g. "1234567890-abcdef.apps.googleusercontent.com"
-  },
-  apple: {
-    clientId: "",     // e.g. "com.example.cardkave.signin" (Service ID)
-    redirectURI: "",  // e.g. "https://shivanka3.github.io/cardkave/"
   },
 };
 
@@ -96,14 +84,55 @@ function snapshotCard(c) {
     id: c.id,
     name: c.name,
     images: { small: c.images?.small || "", large: c.images?.large || c.images?.small || "" },
-    set: { name: c.set?.name || "", releaseDate: c.set?.releaseDate || "", printedTotal: c.set?.printedTotal || "" },
+    set: {
+      id: c.set?.id || setIdFromCardId(c.id),
+      name: c.set?.name || "",
+      releaseDate: c.set?.releaseDate || "",
+      printedTotal: c.set?.printedTotal || "",
+    },
     rarity: c.rarity || "",
     artist: c.artist || "",
     hp: c.hp || "",
     number: c.number || "",
   };
 }
+
+// Card IDs are `{setId}-{number}` and no set ID contains a hyphen, so the
+// first hyphen is the split point. Used for legacy collection entries that
+// were snapshotted before set.id was preserved.
+function setIdFromCardId(cardId) {
+  if (!cardId || typeof cardId !== "string") return "";
+  const i = cardId.indexOf("-");
+  return i > 0 ? cardId.slice(0, i) : "";
+}
+
+// Set completion derived live from the collection: count distinct owned
+// cards whose ID belongs to the given set, divide by the set's printedTotal.
+// Owning secret rares can push ownedDistinct above printedTotal, so the
+// percent is clamped at 100 for display.
+function setCompletion(setId, setMeta) {
+  const total = Number(setMeta?.printedTotal) || 0;
+  const cards = collectionCards.list();
+  let ownedDistinct = 0;
+  for (const c of cards) {
+    const cardSetId = c.set?.id || setIdFromCardId(c.id);
+    if (cardSetId === setId) ownedDistinct++;
+  }
+  const percent = total > 0 ? Math.min(100, Math.round((ownedDistinct / total) * 100)) : 0;
+  return { ownedDistinct, total, percent };
+}
 function makeCardStore(key) {
+  function notifyChange() {
+    // Pages that surface live counts (set completion bar, lists view)
+    // listen for this and repaint. Only the collection store needs the
+    // event today, but mirroring it on every store keeps the API uniform.
+    try {
+      window.dispatchEvent(new CustomEvent(`${key}-changed`));
+      if (key === "collection-cards") {
+        window.dispatchEvent(new CustomEvent("collection-changed"));
+      }
+    } catch {}
+  }
   return {
     key,
     list() {
@@ -120,6 +149,9 @@ function makeCardStore(key) {
     totalCount() {
       return this.list().reduce((sum, c) => sum + (c.quantity || 0), 0);
     },
+    distinctCount() {
+      return this.list().length;
+    },
     add(card) {
       const list = this.list();
       const i = list.findIndex(c => c.id === card.id);
@@ -131,6 +163,7 @@ function makeCardStore(key) {
       localStorage.setItem(key, JSON.stringify(list));
       cloudPush(key, list);
       refreshCounts();
+      notifyChange();
       return list[i >= 0 ? i : 0].quantity;
     },
     remove(cardOrId) {
@@ -139,17 +172,115 @@ function makeCardStore(key) {
       const i = list.findIndex(c => c.id === id);
       if (i < 0) return 0;
       const newQty = list[i].quantity - 1;
-      if (newQty <= 0) list.splice(i, 1);
+      const droppedFromStore = newQty <= 0;
+      if (droppedFromStore) list.splice(i, 1);
       else list[i] = { ...list[i], quantity: newQty };
       localStorage.setItem(key, JSON.stringify(list));
       cloudPush(key, list);
       refreshCounts();
+      notifyChange();
+      // When a card fully leaves the collection, drop it from every list
+      // so a stale list entry can never point at a card we don't own.
+      if (droppedFromStore && key === "collection-cards" && typeof collectionLists !== "undefined") {
+        collectionLists.pruneCard(id);
+      }
       return Math.max(0, newQty);
     },
   };
 }
 const wishlistCards = makeCardStore("wishlist-cards");
 const collectionCards = makeCardStore("collection-cards");
+
+// ---- Collection lists (tag-model: a list references card IDs from the
+// main collection. Adding a card to a list also adds it to the collection
+// if missing. Removing from collection prunes the card from all lists.)
+const collectionLists = {
+  KEY: "collection-lists",
+  list() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(this.KEY)) || [];
+      // Normalize: ensure cardIds is always an array, ids/names exist.
+      return arr.map(l => ({
+        id: l.id || `list_${Math.random().toString(36).slice(2, 10)}`,
+        name: l.name || "Untitled",
+        description: l.description || "",
+        createdAt: l.createdAt || Date.now(),
+        updatedAt: l.updatedAt || l.createdAt || Date.now(),
+        cardIds: Array.isArray(l.cardIds) ? l.cardIds : [],
+      }));
+    } catch { return []; }
+  },
+  save(arr) {
+    localStorage.setItem(this.KEY, JSON.stringify(arr));
+    cloudPush(this.KEY, arr);
+    try { window.dispatchEvent(new CustomEvent("collection-lists-changed")); } catch {}
+  },
+  byId(id) { return this.list().find(l => l.id === id) || null; },
+  create(name, description = "") {
+    const arr = this.list();
+    const list = {
+      id: `list_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: String(name || "").trim() || "Untitled",
+      description: String(description || "").trim(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      cardIds: [],
+    };
+    arr.unshift(list);
+    this.save(arr);
+    return list;
+  },
+  rename(id, name) {
+    const arr = this.list();
+    const i = arr.findIndex(l => l.id === id);
+    if (i < 0) return null;
+    arr[i] = { ...arr[i], name: String(name || "").trim() || arr[i].name, updatedAt: Date.now() };
+    this.save(arr);
+    return arr[i];
+  },
+  delete(id) {
+    const arr = this.list().filter(l => l.id !== id);
+    this.save(arr);
+  },
+  addCard(listId, card) {
+    if (!card || !card.id) return false;
+    // Ensure the card is in the collection first — lists are sub-groupings
+    // of the collection, not a separate store.
+    if (!collectionCards.has(card.id)) collectionCards.add(card);
+    const arr = this.list();
+    const i = arr.findIndex(l => l.id === listId);
+    if (i < 0) return false;
+    if (arr[i].cardIds.includes(card.id)) return false;
+    arr[i] = { ...arr[i], cardIds: [card.id, ...arr[i].cardIds], updatedAt: Date.now() };
+    this.save(arr);
+    return true;
+  },
+  removeCard(listId, cardId) {
+    const arr = this.list();
+    const i = arr.findIndex(l => l.id === listId);
+    if (i < 0) return false;
+    if (!arr[i].cardIds.includes(cardId)) return false;
+    arr[i] = { ...arr[i], cardIds: arr[i].cardIds.filter(id => id !== cardId), updatedAt: Date.now() };
+    this.save(arr);
+    return true;
+  },
+  // Remove a card from every list — called when the card leaves the
+  // collection entirely (quantity hit 0).
+  pruneCard(cardId) {
+    const arr = this.list();
+    let changed = false;
+    const next = arr.map(l => {
+      if (!l.cardIds.includes(cardId)) return l;
+      changed = true;
+      return { ...l, cardIds: l.cardIds.filter(id => id !== cardId), updatedAt: Date.now() };
+    });
+    if (changed) this.save(next);
+  },
+  // Which lists contain this card? Used by the card modal.
+  listsContaining(cardId) {
+    return this.list().filter(l => l.cardIds.includes(cardId));
+  },
+};
 
 const view = document.getElementById("view");
 const tpl = id => document.getElementById(id).content.cloneNode(true);
@@ -377,6 +508,13 @@ function makeSetCard(s) {
   const date = s.releaseDate || "";
   const meta = [s.series, date].filter(Boolean).join(" · ");
   const cardCount = total ? `${total} cards` : "";
+  const completion = s.printedTotal ? setCompletion(s.id, s) : null;
+  const completionBadge = completion && completion.ownedDistinct > 0
+    ? `<div class="set-card-progress" data-complete="${completion.percent >= 100}">
+         <div class="set-card-progress-bar"><div class="set-card-progress-fill" style="width:${completion.percent}%"></div></div>
+         <div class="set-card-progress-text">${completion.ownedDistinct}/${completion.total} · ${completion.percent}%</div>
+       </div>`
+    : "";
   el.innerHTML = `
     <div class="set-card-logo">
       ${s.images?.logo
@@ -387,6 +525,7 @@ function makeSetCard(s) {
       <div class="set-card-name">${s.name}</div>
       <div class="muted mono">${meta}</div>
       ${cardCount ? `<div class="muted mono">${cardCount}</div>` : ""}
+      ${completionBadge}
     </div>
   `;
   return el;
@@ -744,6 +883,10 @@ async function renderSet(setId) {
   const logoEl = document.getElementById("set-logo");
   const grid = document.getElementById("set-cards");
   const status = document.getElementById("set-status");
+  const completionEl = document.getElementById("set-completion");
+  const completionCountEl = document.getElementById("set-completion-count");
+  const completionPercentEl = document.getElementById("set-completion-percent");
+  const completionFillEl = document.getElementById("set-completion-fill");
 
   // Show a loading placeholder right away so the header isn't blank.
   titleEl.textContent = "Loading set…";
@@ -756,6 +899,19 @@ async function renderSet(setId) {
     } else if (setData.images?.symbol) {
       logoEl.innerHTML = `<img src="${setData.images.symbol}" alt="${setData.name || ""}" />`;
     }
+  }
+
+  function paintCompletion(setData) {
+    if (!setData || !setData.printedTotal) {
+      completionEl.classList.add("hidden");
+      return;
+    }
+    const { ownedDistinct, total, percent } = setCompletion(setId, setData);
+    completionCountEl.textContent = `${ownedDistinct} / ${total}`;
+    completionPercentEl.textContent = `${percent}%`;
+    completionFillEl.style.width = `${percent}%`;
+    completionEl.classList.remove("hidden");
+    completionEl.dataset.complete = percent >= 100 ? "true" : "false";
   }
 
   function setMeta(setData, count) {
@@ -771,7 +927,7 @@ async function renderSet(setId) {
 
   let setData = null;
   setPromise.then(s => {
-    if (s) { setData = s; paintHeader(s); }
+    if (s) { setData = s; paintHeader(s); paintCompletion(s); }
   });
 
   let cards;
@@ -788,6 +944,7 @@ async function renderSet(setId) {
     setData = { id: setId, name: setId, series: "", releaseDate: "" };
     paintHeader(setData);
   }
+  paintCompletion(setData);
 
   if (!cards.length) {
     status.textContent = "No cards found in this set.";
@@ -799,7 +956,16 @@ async function renderSet(setId) {
   status.classList.add("hidden");
   grid.innerHTML = "";
   const cleanup = lazyRender(sortSetCards(cards), grid, makeTcgCardEl, { batchSize: 30 });
-  window.__cleanup = () => cleanup && cleanup();
+
+  // Repaint completion when collection changes (the card modal mutates it
+  // while the set page is visible).
+  const onCollectionChange = () => paintCompletion(setData);
+  window.addEventListener("collection-changed", onCollectionChange);
+
+  window.__cleanup = () => {
+    if (cleanup) cleanup();
+    window.removeEventListener("collection-changed", onCollectionChange);
+  };
 }
 
 // ---- Detail
@@ -1023,9 +1189,68 @@ function openCardModal(c) {
     syncCardTiles(c.id);
   };
   syncModalQty(c.id);
+  renderModalLists(c);
 
   modal.classList.remove("hidden");
   document.body.style.overflow = "hidden";
+}
+
+// Render the "Add to list" chips inside the card modal. Each chip toggles
+// the card in/out of that list. Includes a "+ New list" button so users
+// can create a list without leaving the modal. Re-renders on any list
+// mutation while the modal is open.
+function renderModalLists(c) {
+  const wrap = document.getElementById("modal-lists");
+  const chips = document.getElementById("modal-lists-chips");
+  if (!wrap || !chips) return;
+  wrap.dataset.cardId = c.id;
+
+  function paint() {
+    const lists = collectionLists.list();
+    chips.innerHTML = "";
+
+    if (!lists.length) {
+      const empty = document.createElement("p");
+      empty.className = "modal-lists-empty";
+      empty.textContent = "No lists yet.";
+      chips.appendChild(empty);
+    } else {
+      for (const l of lists) {
+        const inList = l.cardIds.includes(c.id);
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "modal-lists-chip" + (inList ? " active" : "");
+        chip.innerHTML = `
+          <span class="modal-lists-chip-check" aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </span>
+          <span>${escapeHtml(l.name)}</span>
+        `;
+        chip.addEventListener("click", () => {
+          if (inList) collectionLists.removeCard(l.id, c.id);
+          else collectionLists.addCard(l.id, c);
+          paint();
+          syncCardTiles(c.id);
+        });
+        chips.appendChild(chip);
+      }
+    }
+
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "modal-lists-newbtn";
+    newBtn.textContent = "+ New list";
+    newBtn.addEventListener("click", () => {
+      const name = prompt("Name this list:");
+      if (!name || !name.trim()) return;
+      const created = collectionLists.create(name);
+      collectionLists.addCard(created.id, c);
+      paint();
+    });
+    chips.appendChild(newBtn);
+  }
+
+  paint();
 }
 
 function closeCardModal() {
@@ -1068,11 +1293,153 @@ function renderCardList(store, route, title, emptyMsg, listSource) {
   cards.forEach(c => grid.appendChild(makeTcgCardEl(c, { listSource })));
 }
 
-const renderCollection = () => renderCardList(
-  collectionCards, "collection", "Collection",
-  "No cards yet. Open a card and add it to your collection.",
-  "collection"
-);
+// Which list is selected on the Collection page. "all" means the full
+// collection (no filter); otherwise it's a list ID. Survives navigation
+// within a session but doesn't need to be persisted across reloads.
+let activeCollectionListId = "all";
+
+function renderCollection() {
+  setActiveNav("collection");
+  view.innerHTML = "";
+  view.appendChild(tpl("tpl-list"));
+  document.getElementById("list-title").textContent = "Collection";
+
+  // Insert the lists toolbar right after the title.
+  const titleEl = document.getElementById("list-title");
+  const toolbar = buildCollectionListsToolbar();
+  titleEl.insertAdjacentElement("afterend", toolbar);
+
+  paintCollectionView();
+
+  // Repaint on any data change so the active list stays in sync as cards
+  // are added/removed elsewhere (modal stays open across page transitions).
+  const onChange = () => paintCollectionView();
+  window.addEventListener("collection-changed", onChange);
+  window.addEventListener("collection-lists-changed", onChange);
+  window.__cleanup = () => {
+    window.removeEventListener("collection-changed", onChange);
+    window.removeEventListener("collection-lists-changed", onChange);
+  };
+}
+
+function buildCollectionListsToolbar() {
+  const wrap = document.createElement("div");
+  wrap.className = "collection-lists-toolbar";
+  wrap.id = "collection-lists-toolbar";
+  return wrap;
+}
+
+function paintCollectionView() {
+  const toolbar = document.getElementById("collection-lists-toolbar");
+  const empty = document.getElementById("list-empty");
+  const grid = document.getElementById("list-grid");
+  if (!toolbar || !empty || !grid) return;
+
+  const lists = collectionLists.list();
+  const allCards = collectionCards.list();
+
+  // If the active list no longer exists (deleted), fall back to "all".
+  if (activeCollectionListId !== "all" && !lists.some(l => l.id === activeCollectionListId)) {
+    activeCollectionListId = "all";
+  }
+
+  // ---- Toolbar: tabs + "New list" button
+  toolbar.innerHTML = "";
+  const tabs = document.createElement("div");
+  tabs.className = "collection-lists-tabs";
+
+  const allTab = document.createElement("button");
+  allTab.type = "button";
+  allTab.className = "collection-lists-tab" + (activeCollectionListId === "all" ? " active" : "");
+  allTab.innerHTML = `<span>All cards</span><span class="collection-lists-count">${allCards.length}</span>`;
+  allTab.addEventListener("click", () => { activeCollectionListId = "all"; paintCollectionView(); });
+  tabs.appendChild(allTab);
+
+  for (const l of lists) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "collection-lists-tab" + (activeCollectionListId === l.id ? " active" : "");
+    tab.innerHTML = `<span>${escapeHtml(l.name)}</span><span class="collection-lists-count">${l.cardIds.length}</span>`;
+    tab.addEventListener("click", () => { activeCollectionListId = l.id; paintCollectionView(); });
+    tabs.appendChild(tab);
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.type = "button";
+  newBtn.className = "collection-lists-new";
+  newBtn.textContent = "+ New list";
+  newBtn.addEventListener("click", () => {
+    const name = prompt("Name this list (e.g. 'Trade pile', 'Christmas wishlist'):");
+    if (!name || !name.trim()) return;
+    const created = collectionLists.create(name);
+    activeCollectionListId = created.id;
+    paintCollectionView();
+  });
+
+  toolbar.appendChild(tabs);
+  toolbar.appendChild(newBtn);
+
+  // ---- Active-list controls (rename/delete) shown when a list is selected
+  if (activeCollectionListId !== "all") {
+    const active = lists.find(l => l.id === activeCollectionListId);
+    if (active) {
+      const meta = document.createElement("div");
+      meta.className = "collection-list-meta";
+      const renameBtn = document.createElement("button");
+      renameBtn.type = "button";
+      renameBtn.className = "collection-list-action";
+      renameBtn.textContent = "Rename";
+      renameBtn.addEventListener("click", () => {
+        const next = prompt("Rename list:", active.name);
+        if (next && next.trim()) collectionLists.rename(active.id, next.trim());
+      });
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "collection-list-action collection-list-action-danger";
+      delBtn.textContent = "Delete list";
+      delBtn.addEventListener("click", () => {
+        if (!confirm(`Delete list "${active.name}"? Cards stay in your collection.`)) return;
+        collectionLists.delete(active.id);
+      });
+      meta.appendChild(renameBtn);
+      meta.appendChild(delBtn);
+      toolbar.appendChild(meta);
+    }
+  }
+
+  // ---- Grid: filter to the active list (or show all)
+  const visible = activeCollectionListId === "all"
+    ? allCards
+    : (() => {
+        const list = lists.find(l => l.id === activeCollectionListId);
+        if (!list) return [];
+        const idSet = new Set(list.cardIds);
+        // Preserve the order the cards were added to the list (newest first).
+        return list.cardIds
+          .map(id => allCards.find(c => c.id === id))
+          .filter(Boolean);
+      })();
+
+  grid.innerHTML = "";
+  if (!visible.length) {
+    empty.textContent = activeCollectionListId === "all"
+      ? "No cards yet. Open a card and add it to your collection."
+      : "This list is empty. Open a card and add it to this list.";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  grid.classList.remove("grid");
+  grid.classList.add("tcg-grid");
+  visible.forEach(c => grid.appendChild(makeTcgCardEl(c, { listSource: "collection" })));
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
 const renderCardWishlist = () => renderCardList(
   wishlistCards, "wishlist", "Wishlist",
   "No cards yet. Open a card and add it to your wishlist.",
@@ -1230,7 +1597,7 @@ const authStore = {
     const acc = this.findByEmail(email);
     if (!acc) throw new Error("No account found with that email.");
     if (acc.provider !== "email") {
-      throw new Error(`This email is registered with ${acc.provider === "google" ? "Google" : "Apple"}. Use that to sign in.`);
+      throw new Error(`This email is registered with Google. Use that to sign in.`);
     }
     const candidate = await hashPassword(password);
     if (candidate !== acc.passwordHash) throw new Error("Incorrect password. Try again.");
@@ -1238,39 +1605,41 @@ const authStore = {
     return acc;
   },
 
+  // Returns { acc, isNew } so the caller can route brand-new Google users
+  // to the signup-completion page instead of straight to /browse.
   async signInWithGoogle({ location } = {}) {
     if (!cloudSync.enabled) {
       throw new Error("Cloud sign-in is not configured. See SETUP_FIREBASE.md.");
     }
     try {
-      await cloudSync.signInWithGoogle({ location });
-      return this.current();
+      const res = await cloudSync.signInWithGoogle({ location });
+      return { acc: this.current(), isNew: !!(res && res.isNew) };
     } catch (e) {
       throw new Error(humanFirebaseError(e));
     }
   },
 
-  // Used only in local-only mode by the simulator OAuth flow.
+  // Used only in local-only mode by the simulator OAuth flow. Returns
+  // { acc, isNew } so callers can route brand-new accounts through the
+  // signup-completion page.
   signInWithProvider({ provider, email, displayName, location }) {
     if (cloudSync.enabled) {
-      throw new Error(
-        provider === "apple"
-          ? "Apple sign-in isn't wired up to Firebase yet — use Google or email."
-          : "Use authStore.signInWithGoogle() instead when cloud sync is on."
-      );
+      throw new Error("Use authStore.signInWithGoogle() instead when cloud sync is on.");
     }
     const e = String(email).trim().toLowerCase();
     const arr = this.accounts();
     let acc = arr.find(a => a.email === e);
+    let isNew = false;
     if (acc) {
       if (acc.provider !== provider) {
-        const used = acc.provider === "email" ? "email and password" : (acc.provider === "google" ? "Google" : "Apple");
+        const used = acc.provider === "email" ? "email and password" : "Google";
         throw new Error(`This email is already registered with ${used}. Use that to sign in.`);
       }
       if (displayName && !acc.displayName) acc.displayName = displayName;
       if (location && !acc.location) acc.location = location;
       this.saveAccounts(arr);
     } else {
+      isNew = true;
       acc = {
         id: uid("acc"),
         email: e,
@@ -1284,7 +1653,7 @@ const authStore = {
       this.saveAccounts(arr);
     }
     this.setSession(acc.id);
-    return acc;
+    return { acc, isNew };
   },
 
   updateCurrent(patch) {
@@ -1336,7 +1705,7 @@ const authStore = {
     const acc = this.current();
     if (!acc) throw new Error("You're not signed in.");
     if (acc.provider !== "email") {
-      throw new Error(`This account signs in with ${acc.provider === "google" ? "Google" : "Apple"} — manage the password there.`);
+      throw new Error(`This account signs in with Google — manage the password there.`);
     }
     if (newPassword.length < 6) throw new Error("New password must be at least 6 characters.");
     if (cloudSync.enabled) {
@@ -1773,7 +2142,7 @@ function renderProfile() {
     const meta = document.getElementById("profile-meta");
     const a = authStore.current();
     if (a && me) {
-      const providerLabel = a.provider === "google" ? "Google" : a.provider === "apple" ? "Apple" : "email";
+      const providerLabel = a.provider === "google" ? "Google" : "email";
       const bits = [me.name, me.location, `${a.email} · ${providerLabel}`].filter(Boolean);
       meta.textContent = bits.join(" · ");
     }
@@ -1922,7 +2291,7 @@ function renderProfile() {
   const resetLinkBtn = document.getElementById("password-reset-link");
 
   if (acc.provider !== "email") {
-    passwordSub.textContent = `Managed by ${acc.provider === "google" ? "Google" : "Apple"} — no password to change.`;
+    passwordSub.textContent = `Managed by Google — no password to change.`;
     [currentPw, newPw, confirmPw, passwordSubmit].forEach(el => { el.disabled = true; });
     resetLinkBtn.disabled = true;
   }
@@ -2176,28 +2545,19 @@ function renderLogin() {
   document.getElementById("login-google").addEventListener("click", async () => {
     clearError();
     try {
+      let isNew = false;
       if (cloudSync.enabled) {
-        await authStore.signInWithGoogle();
+        const res = await authStore.signInWithGoogle();
+        isNew = !!(res && res.isNew);
       } else {
         const profile = await runGoogleOAuth();
         if (!profile) return;
-        authStore.signInWithProvider({ provider: "google", ...profile });
+        const res = authStore.signInWithProvider({ provider: "google", ...profile });
+        isNew = !!(res && res.isNew);
       }
-      location.hash = "#/browse";
-    } catch (err) { showError(err.message); }
-  });
-
-  document.getElementById("login-apple").addEventListener("click", async () => {
-    clearError();
-    if (cloudSync.enabled) {
-      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
-      return;
-    }
-    try {
-      const profile = await runAppleOAuth();
-      if (!profile) return;
-      authStore.signInWithProvider({ provider: "apple", ...profile });
-      location.hash = "#/browse";
+      // Brand-new Google users still need to enter the rest of their profile
+      // (display name + city/area) — mirror the email signup requirement.
+      location.hash = isNew ? "#/complete-signup" : "#/browse";
     } catch (err) { showError(err.message); }
   });
 }
@@ -2262,33 +2622,79 @@ function renderSignup() {
   document.getElementById("signup-google").addEventListener("click", async () => {
     clearError();
     try {
+      // Don't pre-seed location from the signup form here — new Google users
+      // always go through the completion page, where they enter it fresh.
+      let isNew = false;
       if (cloudSync.enabled) {
-        await authStore.signInWithGoogle({ location: locInp.value.trim() });
+        const res = await authStore.signInWithGoogle();
+        isNew = !!(res && res.isNew);
       } else {
         const profile = await runGoogleOAuth();
         if (!profile) return;
-        authStore.signInWithProvider({ provider: "google", ...profile, location: locInp.value.trim() });
+        const res = authStore.signInWithProvider({ provider: "google", ...profile });
+        isNew = !!(res && res.isNew);
       }
-      location.hash = "#/browse";
-    } catch (err) { showError(err.message); }
-  });
-
-  document.getElementById("signup-apple").addEventListener("click", async () => {
-    clearError();
-    if (cloudSync.enabled) {
-      showError("Apple sign-in isn't wired up to Firebase yet — use Google or email.");
-      return;
-    }
-    try {
-      const profile = await runAppleOAuth();
-      if (!profile) return;
-      authStore.signInWithProvider({ provider: "apple", ...profile, location: locInp.value.trim() });
-      location.hash = "#/browse";
+      location.hash = isNew ? "#/complete-signup" : "#/browse";
     } catch (err) { showError(err.message); }
   });
 }
 
-// ---- OAuth simulators (Google / Apple)
+// ---- Render: Complete signup (Google new-user profile finish)
+// Brand-new Google users are routed here after sign-in to enter the same
+// info the email signup form collects: display name (prefilled from Google)
+// and city/area. Email + password are managed by Google so we don't ask
+// for those again.
+function renderCompleteSignup() {
+  setActiveNav("login");
+  view.innerHTML = "";
+  view.appendChild(tpl("tpl-complete-signup"));
+
+  const acc = authStore.current();
+  if (!acc) { location.hash = "#/login"; return; }
+  // If the user already filled in a location somehow (e.g. they refreshed
+  // after partly completing this page), don't force them through it again.
+  if (acc.location && acc.displayName) { location.hash = "#/browse"; return; }
+
+  const emailEl = document.getElementById("complete-email");
+  const nameInp = document.getElementById("complete-name");
+  const locInp = document.getElementById("complete-location");
+  const errEl = document.getElementById("complete-error");
+  const submitBtn = document.getElementById("complete-submit");
+
+  emailEl.textContent = acc.email || "";
+  nameInp.value = acc.displayName || "";
+  locInp.value = acc.location || "";
+
+  function showError(msg) {
+    errEl.textContent = msg;
+    errEl.classList.remove("hidden");
+  }
+  function clearError() {
+    errEl.textContent = "";
+    errEl.classList.add("hidden");
+  }
+
+  document.getElementById("complete-signup-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    clearError();
+    const name = nameInp.value.trim();
+    const loc = locInp.value.trim();
+    if (!name) return showError("Display name is required.");
+    if (!loc) return showError("City or area is required.");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Saving…";
+    try {
+      authStore.updateCurrent({ displayName: name, location: loc });
+      location.hash = "#/browse";
+    } catch (err) {
+      showError(err.message || "Couldn't save profile.");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Continue";
+    }
+  });
+}
+
+// ---- OAuth simulator (Google)
 function openOAuthModal(templateId) {
   const modal = document.getElementById("oauth-modal");
   const popup = document.getElementById("oauth-popup");
@@ -2374,89 +2780,6 @@ function runGoogleOAuthSimulator() {
       const name = document.getElementById("oauth-google-name").value.trim();
       if (!isValidEmail(email) || !name) return;
       showLoadingState(popup, "Signing in to Google…");
-      setTimeout(() => settle({ email, displayName: name }), 650);
-    });
-  });
-}
-
-function runAppleOAuth() {
-  if (OAUTH_CONFIG.apple.clientId) return runAppleOAuthReal();
-  return runAppleOAuthSimulator();
-}
-
-function decodeJwt(token) {
-  if (typeof token !== "string") return null;
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = payload + "=".repeat((4 - payload.length % 4) % 4);
-    return JSON.parse(decodeURIComponent(escape(atob(padded))));
-  } catch { return null; }
-}
-
-function runAppleOAuthReal() {
-  return new Promise(resolve => {
-    if (typeof AppleID === "undefined" || !AppleID.auth) {
-      alert("Apple Sign-In is still loading — try again in a moment.");
-      return resolve(null);
-    }
-    try {
-      AppleID.auth.init({
-        clientId: OAUTH_CONFIG.apple.clientId,
-        scope: "name email",
-        redirectURI: OAUTH_CONFIG.apple.redirectURI || window.location.origin + window.location.pathname,
-        usePopup: true,
-      });
-    } catch (e) {
-      alert("Apple Sign-In init failed: " + (e.message || e));
-      return resolve(null);
-    }
-    AppleID.auth.signIn().then(data => {
-      const claims = decodeJwt(data?.authorization?.id_token);
-      const email = claims?.email || data?.user?.email;
-      if (!email) {
-        alert("Apple did not return an email.");
-        return resolve(null);
-      }
-      const userName = data?.user?.name;
-      const displayName = userName?.firstName
-        ? `${userName.firstName} ${userName.lastName || ""}`.trim()
-        : (claims?.name || email.split("@")[0]);
-      resolve({ email, displayName });
-    }).catch(err => {
-      const code = err && (err.error || err.code);
-      if (code && code !== "popup_closed_by_user" && code !== "user_cancelled_authorize") {
-        alert("Apple sign-in failed: " + (err.error || err.message || code));
-      }
-      resolve(null);
-    });
-  });
-}
-
-function runAppleOAuthSimulator() {
-  return new Promise(resolve => {
-    const { popup } = openOAuthModal("tpl-oauth-apple");
-    let settled = false;
-    function settle(value) {
-      if (settled) return;
-      settled = true;
-      closeOAuthModal();
-      resolve(value);
-    }
-    document.getElementById("oauth-close-apple").addEventListener("click", () => settle(null));
-    document.getElementById("oauth-backdrop").addEventListener("click", () => settle(null));
-
-    document.getElementById("oauth-apple-form").addEventListener("submit", e => {
-      e.preventDefault();
-      const rawEmail = document.getElementById("oauth-apple-email").value.trim();
-      const name = document.getElementById("oauth-apple-name").value.trim();
-      const hide = document.getElementById("oauth-apple-hide").checked;
-      if (!isValidEmail(rawEmail) || !name) return;
-      const email = hide
-        ? `${Math.random().toString(36).slice(2, 10)}@privaterelay.appleid.com`
-        : rawEmail;
-      showLoadingState(popup, "Signing in with Apple…");
       setTimeout(() => settle({ email, displayName: name }), 650);
     });
   });
@@ -4741,12 +5064,13 @@ function route() {
     return;
   }
 
-  const inAuth = a === "login" || a === "signup";
+  const inAuth = a === "login" || a === "signup" || a === "complete-signup";
   document.body.classList.toggle("auth-mode", inAuth);
   document.documentElement.classList.toggle("auth-mode", inAuth);
 
   if (a === "login") return renderLogin();
   if (a === "signup") return renderSignup();
+  if (a === "complete-signup") return renderCompleteSignup();
   if (a === "p" && b) return renderDetail(b);
   if (a === "sets" && b) return renderSet(b);
   if (a === "collection") return renderCollection();

@@ -40,9 +40,10 @@
   //   shape: "object" → write the whole object as the doc
   //   shape: "array"  → wrap as { [field]: array } in the doc
   const PER_USER = {
-    "user-profile":     { doc: "__profile__", shape: "object" }, // special: user doc itself
-    "collection-cards": { doc: "collection",  shape: "array", field: "cards" },
-    "wishlist-cards":   { doc: "wishlist",    shape: "array", field: "cards" },
+    "user-profile":     { doc: "__profile__",   shape: "object" }, // special: user doc itself
+    "collection-cards": { doc: "collection",    shape: "array", field: "cards" },
+    "wishlist-cards":   { doc: "wishlist",      shape: "array", field: "cards" },
+    "collection-lists": { doc: "collectionLists", shape: "array", field: "lists" },
   };
 
   // Shared: one Firestore doc per array item, top-level collection.
@@ -320,10 +321,14 @@
     provider.addScope("email");
     provider.addScope("profile");
     const cred = await auth.signInWithPopup(provider);
-    // For brand-new Google accounts, seed the profile doc.
+    // For brand-new Google accounts, seed the profile doc. We also report
+    // isNew back to the caller so the UI can route the user to the signup-
+    // completion page where they enter display name + city/area, matching
+    // the email-signup requirements.
     const docRef = db.collection("users").doc(cred.user.uid);
     const snap = await docRef.get();
-    if (!snap.exists) {
+    const isNew = !snap.exists;
+    if (isNew) {
       const profile = {
         name:     cred.user.displayName || (cred.user.email || "").split("@")[0],
         email:    cred.user.email || "",
@@ -335,7 +340,7 @@
       await docRef.set(profile, { merge: true });
       localStorage.setItem("user-profile", JSON.stringify(profile));
     }
-    return cred.user;
+    return { user: cred.user, isNew };
   }
 
   async function updateProfile(patch) {
