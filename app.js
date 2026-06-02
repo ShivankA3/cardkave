@@ -123,14 +123,8 @@ function setCompletion(setId, setMeta) {
 }
 function makeCardStore(key) {
   function notifyChange() {
-    // Pages that surface live counts (set completion bar, lists view)
-    // listen for this and repaint. Only the collection store needs the
-    // event today, but mirroring it on every store keeps the API uniform.
     try {
       window.dispatchEvent(new CustomEvent(`${key}-changed`));
-      if (key === "collection-cards") {
-        window.dispatchEvent(new CustomEvent("collection-changed"));
-      }
     } catch {}
   }
   return {
@@ -172,48 +166,36 @@ function makeCardStore(key) {
       const i = list.findIndex(c => c.id === id);
       if (i < 0) return 0;
       const newQty = list[i].quantity - 1;
-      const droppedFromStore = newQty <= 0;
-      if (droppedFromStore) list.splice(i, 1);
+      if (newQty <= 0) list.splice(i, 1);
       else list[i] = { ...list[i], quantity: newQty };
       localStorage.setItem(key, JSON.stringify(list));
       cloudPush(key, list);
       refreshCounts();
       notifyChange();
-      // When a card fully leaves the collection, drop it from every list
-      // so a stale list entry can never point at a card we don't own.
-      if (droppedFromStore && key === "collection-cards" && typeof collectionLists !== "undefined") {
-        collectionLists.pruneCard(id);
-      }
       return Math.max(0, newQty);
     },
   };
 }
 const wishlistCards = makeCardStore("wishlist-cards");
-const collectionCards = makeCardStore("collection-cards");
 
-// ---- Collection lists (tag-model: a list references card IDs from the
-// main collection. Adding a card to a list also adds it to the collection
-// if missing. Removing from collection prunes the card from all lists.)
+// ---- Collection lists (independent-bag model: each list owns its own
+// cards with its own quantity. Adding a card to List A has no effect on
+// List B. The "All cards" view aggregates by summing quantities across
+// every list.)
 const collectionLists = {
   KEY: "collection-lists",
   list() {
     try {
       const arr = JSON.parse(localStorage.getItem(this.KEY)) || [];
-      // Normalize: ensure cardIds is always an array, ids/names exist.
-      return arr.map(l => ({
-        id: l.id || `list_${Math.random().toString(36).slice(2, 10)}`,
-        name: l.name || "Untitled",
-        description: l.description || "",
-        createdAt: l.createdAt || Date.now(),
-        updatedAt: l.updatedAt || l.createdAt || Date.now(),
-        cardIds: Array.isArray(l.cardIds) ? l.cardIds : [],
-      }));
+      return arr.map(l => normalizeList(l));
     } catch { return []; }
   },
   save(arr) {
     localStorage.setItem(this.KEY, JSON.stringify(arr));
     cloudPush(this.KEY, arr);
+    refreshAggregateCollection();
     try { window.dispatchEvent(new CustomEvent("collection-lists-changed")); } catch {}
+    try { window.dispatchEvent(new CustomEvent("collection-changed")); } catch {}
   },
   byId(id) { return this.list().find(l => l.id === id) || null; },
   create(name, description = "") {
@@ -224,7 +206,7 @@ const collectionLists = {
       description: String(description || "").trim(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      cardIds: [],
+      cards: [],
     };
     arr.unshift(list);
     this.save(arr);
@@ -242,45 +224,178 @@ const collectionLists = {
     const arr = this.list().filter(l => l.id !== id);
     this.save(arr);
   },
+  quantityIn(listId, cardId) {
+    const list = this.byId(listId);
+    if (!list) return 0;
+    const c = list.cards.find(c => c.id === cardId);
+    return c ? (c.quantity || 0) : 0;
+  },
+  // Add one copy of the card to this list. Independent of every other
+  // list — adding here never touches anything else.
   addCard(listId, card) {
     if (!card || !card.id) return false;
-    // Ensure the card is in the collection first — lists are sub-groupings
-    // of the collection, not a separate store.
-    if (!collectionCards.has(card.id)) collectionCards.add(card);
     const arr = this.list();
     const i = arr.findIndex(l => l.id === listId);
     if (i < 0) return false;
-    if (arr[i].cardIds.includes(card.id)) return false;
-    arr[i] = { ...arr[i], cardIds: [card.id, ...arr[i].cardIds], updatedAt: Date.now() };
+    const cards = arr[i].cards.slice();
+    const j = cards.findIndex(c => c.id === card.id);
+    if (j >= 0) {
+      cards[j] = { ...cards[j], quantity: (cards[j].quantity || 0) + 1 };
+    } else {
+      cards.unshift({ ...snapshotCard(card), quantity: 1 });
+    }
+    arr[i] = { ...arr[i], cards, updatedAt: Date.now() };
     this.save(arr);
     return true;
   },
+  // Remove one copy of the card from this list. Drops the entry entirely
+  // when its per-list quantity hits zero.
   removeCard(listId, cardId) {
     const arr = this.list();
     const i = arr.findIndex(l => l.id === listId);
     if (i < 0) return false;
-    if (!arr[i].cardIds.includes(cardId)) return false;
-    arr[i] = { ...arr[i], cardIds: arr[i].cardIds.filter(id => id !== cardId), updatedAt: Date.now() };
+    const cards = arr[i].cards.slice();
+    const j = cards.findIndex(c => c.id === cardId);
+    if (j < 0) return false;
+    const newQty = (cards[j].quantity || 0) - 1;
+    if (newQty <= 0) cards.splice(j, 1);
+    else cards[j] = { ...cards[j], quantity: newQty };
+    arr[i] = { ...arr[i], cards, updatedAt: Date.now() };
     this.save(arr);
     return true;
   },
-  // Remove a card from every list — called when the card leaves the
-  // collection entirely (quantity hit 0).
-  pruneCard(cardId) {
-    const arr = this.list();
-    let changed = false;
-    const next = arr.map(l => {
-      if (!l.cardIds.includes(cardId)) return l;
-      changed = true;
-      return { ...l, cardIds: l.cardIds.filter(id => id !== cardId), updatedAt: Date.now() };
-    });
-    if (changed) this.save(next);
-  },
   // Which lists contain this card? Used by the card modal.
   listsContaining(cardId) {
-    return this.list().filter(l => l.cardIds.includes(cardId));
+    return this.list().filter(l => l.cards.some(c => c.id === cardId));
   },
 };
+
+// Normalize a stored list, migrating legacy `cardIds` shape to `cards`.
+// Legacy entries pull full card data from the global collection-cards
+// snapshot so the migration is non-destructive.
+function normalizeList(l) {
+  const base = {
+    id: l.id || `list_${Math.random().toString(36).slice(2, 10)}`,
+    name: l.name || "Untitled",
+    description: l.description || "",
+    createdAt: l.createdAt || Date.now(),
+    updatedAt: l.updatedAt || l.createdAt || Date.now(),
+  };
+  if (Array.isArray(l.cards)) {
+    return { ...base, cards: l.cards.map(c => (c && c.quantity ? c : { ...c, quantity: 1 })) };
+  }
+  if (Array.isArray(l.cardIds)) {
+    let globalCards = [];
+    try { globalCards = JSON.parse(localStorage.getItem("collection-cards")) || []; } catch {}
+    const byId = new Map(globalCards.map(c => [c.id, c]));
+    const cards = l.cardIds
+      .map(id => byId.get(id))
+      .filter(Boolean)
+      .map(c => ({ ...c, quantity: c.quantity || 1 }));
+    return { ...base, cards };
+  }
+  return { ...base, cards: [] };
+}
+
+// Aggregated read-only view of every card across every list, used by
+// the "All cards" view, set completion, trade-profile sync, and tile
+// quantity badges. Persisted to localStorage (and Firestore) as a
+// snapshot so existing consumers that read the key directly keep working.
+const collectionCards = {
+  key: "collection-cards",
+  list() {
+    const agg = new Map();
+    for (const l of collectionLists.list()) {
+      for (const c of l.cards) {
+        const prev = agg.get(c.id);
+        if (prev) prev.quantity = (prev.quantity || 0) + (c.quantity || 0);
+        else agg.set(c.id, { ...c, quantity: c.quantity || 0 });
+      }
+    }
+    return Array.from(agg.values());
+  },
+  has(id) { return this.quantity(id) > 0; },
+  quantity(id) {
+    let n = 0;
+    for (const l of collectionLists.list()) {
+      const c = l.cards.find(c => c.id === id);
+      if (c) n += c.quantity || 0;
+    }
+    return n;
+  },
+  totalCount() {
+    let n = 0;
+    for (const l of collectionLists.list()) {
+      for (const c of l.cards) n += c.quantity || 0;
+    }
+    return n;
+  },
+  distinctCount() { return this.list().length; },
+};
+
+// Snapshot the aggregated collection to localStorage + Firestore so other
+// consumers (trade-profile sync, set completion reads, legacy code) see
+// it without needing to recompute on every read.
+function refreshAggregateCollection() {
+  const agg = collectionCards.list();
+  localStorage.setItem("collection-cards", JSON.stringify(agg));
+  cloudPush("collection-cards", agg);
+}
+
+// One-time migration from the old tag-model (lists store cardIds that
+// point at a shared collection) to the new bag-model (each list owns its
+// own cards with its own quantity).
+//
+// - Lists with `cardIds` are rewritten to `cards`, each entry with qty 1
+//   (the old model didn't track per-list quantity).
+// - Any card that lived in collection-cards but not in any list is moved
+//   into an auto-created "Collection" list so no data is lost.
+//
+// Idempotent — re-running on already-migrated data is a no-op.
+function migrateCollectionListsShape() {
+  let lists, globalCards;
+  try { lists = JSON.parse(localStorage.getItem("collection-lists")) || []; } catch { return; }
+  try { globalCards = JSON.parse(localStorage.getItem("collection-cards")) || []; } catch { globalCards = []; }
+  if (!Array.isArray(lists)) lists = [];
+  if (!Array.isArray(globalCards)) globalCards = [];
+
+  const hasLegacyList = lists.some(l => Array.isArray(l.cardIds) && !Array.isArray(l.cards));
+  const inAnyList = new Set();
+  for (const l of lists) {
+    if (Array.isArray(l.cardIds)) l.cardIds.forEach(id => inAnyList.add(id));
+    if (Array.isArray(l.cards)) l.cards.forEach(c => inAnyList.add(c.id));
+  }
+  const orphans = globalCards.filter(c => c && c.id && !inAnyList.has(c.id));
+  if (!hasLegacyList && !orphans.length) return;
+
+  const byId = new Map(globalCards.map(c => [c.id, c]));
+  const migrated = lists.map(l => {
+    if (Array.isArray(l.cards)) return l;
+    const ids = Array.isArray(l.cardIds) ? l.cardIds : [];
+    const cards = ids
+      .map(id => byId.get(id))
+      .filter(Boolean)
+      .map(c => ({ ...c, quantity: 1 }));
+    const { cardIds, ...rest } = l;
+    return { ...rest, cards };
+  });
+
+  if (orphans.length) {
+    migrated.push({
+      id: `list_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: "Collection",
+      description: "",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      cards: orphans.map(c => ({ ...c, quantity: c.quantity || 1 })),
+    });
+  }
+
+  localStorage.setItem("collection-lists", JSON.stringify(migrated));
+  cloudPush("collection-lists", migrated);
+  refreshAggregateCollection();
+}
+migrateCollectionListsShape();
 
 const view = document.getElementById("view");
 const tpl = id => document.getElementById(id).content.cloneNode(true);
@@ -1015,11 +1130,14 @@ async function renderDetail(id) {
 // Build a TCG card tile. Clicking the image opens the modal where the user
 // picks collection/wishlist and adjusts quantity. Optional `listSource` shows
 // a quantity badge from that store on the tile (used on saved-list pages).
+// Pass `listId` to show the per-list quantity (when viewing a specific
+// list); without it, the badge falls back to the aggregate.
 function makeTcgCardEl(c, opts = {}) {
   const wrap = document.createElement("div");
   wrap.className = "tcg-card";
   wrap.dataset.cardId = c.id;
   if (opts.listSource) wrap.dataset.listSource = opts.listSource;
+  if (opts.listId) wrap.dataset.listId = opts.listId;
 
   const imgBtn = document.createElement("button");
   imgBtn.className = "tcg-img";
@@ -1033,8 +1151,12 @@ function makeTcgCardEl(c, opts = {}) {
   wrap.appendChild(imgBtn);
 
   if (opts.listSource) {
-    const store = opts.listSource === "collection" ? collectionCards : wishlistCards;
-    const qty = store.quantity(c.id);
+    let qty;
+    if (opts.listSource === "collection") {
+      qty = opts.listId ? collectionLists.quantityIn(opts.listId, c.id) : collectionCards.quantity(c.id);
+    } else {
+      qty = wishlistCards.quantity(c.id);
+    }
     const badge = document.createElement("span");
     badge.className = "tcg-qty-badge";
     badge.textContent = `×${qty}`;
@@ -1048,8 +1170,13 @@ function makeTcgCardEl(c, opts = {}) {
 function syncCardTiles(cardId) {
   document.querySelectorAll(`.tcg-card[data-card-id="${cardId}"][data-list-source]`).forEach(tile => {
     const source = tile.dataset.listSource;
-    const store = source === "collection" ? collectionCards : wishlistCards;
-    const qty = store.quantity(cardId);
+    let qty;
+    if (source === "collection") {
+      const listId = tile.dataset.listId;
+      qty = listId ? collectionLists.quantityIn(listId, cardId) : collectionCards.quantity(cardId);
+    } else {
+      qty = wishlistCards.quantity(cardId);
+    }
     if (qty <= 0) {
       tile.remove();
       return;
@@ -1072,15 +1199,11 @@ function syncCardTiles(cardId) {
 }
 
 function syncModalQty(cardId) {
-  const collQtyEl = document.getElementById("modal-collect-qty");
-  if (!collQtyEl || collQtyEl.dataset.cardId !== cardId) return;
-  const collQty = collectionCards.quantity(cardId);
+  const wishQtyEl = document.getElementById("modal-wish-qty");
+  if (!wishQtyEl || wishQtyEl.dataset.cardId !== cardId) return;
   const wishQty = wishlistCards.quantity(cardId);
-  collQtyEl.textContent = collQty;
-  document.getElementById("modal-wish-qty").textContent = wishQty;
-  document.getElementById("modal-collect-minus").disabled = collQty <= 0;
+  wishQtyEl.textContent = wishQty;
   document.getElementById("modal-wish-minus").disabled = wishQty <= 0;
-  document.getElementById("modal-collect-ctrl").classList.toggle("has-items", collQty > 0);
   document.getElementById("modal-wish-ctrl").classList.toggle("has-items", wishQty > 0);
 }
 
@@ -1167,19 +1290,9 @@ function openCardModal(c) {
   document.getElementById("modal-artist").textContent = c.artist || "—";
   document.getElementById("modal-hp").textContent = c.hp || "—";
 
-  const collQty = document.getElementById("modal-collect-qty");
   const wishQty = document.getElementById("modal-wish-qty");
-  collQty.dataset.cardId = c.id;
   wishQty.dataset.cardId = c.id;
 
-  document.getElementById("modal-collect-plus").onclick = () => {
-    collectionCards.add(c);
-    syncCardTiles(c.id);
-  };
-  document.getElementById("modal-collect-minus").onclick = () => {
-    collectionCards.remove(c);
-    syncCardTiles(c.id);
-  };
   document.getElementById("modal-wish-plus").onclick = () => {
     wishlistCards.add(c);
     syncCardTiles(c.id);
@@ -1195,10 +1308,10 @@ function openCardModal(c) {
   document.body.style.overflow = "hidden";
 }
 
-// Render the "Add to list" chips inside the card modal. Each chip toggles
-// the card in/out of that list. Includes a "+ New list" button so users
-// can create a list without leaving the modal. Re-renders on any list
-// mutation while the modal is open.
+// Render the per-list quantity steppers inside the card modal. Each row
+// has its own +/− that adjusts ONLY that list's quantity — lists are
+// fully independent of each other. Includes a "+ New list" button so
+// users can create a list without leaving the modal.
 function renderModalLists(c) {
   const wrap = document.getElementById("modal-lists");
   const chips = document.getElementById("modal-lists-chips");
@@ -1212,27 +1325,32 @@ function renderModalLists(c) {
     if (!lists.length) {
       const empty = document.createElement("p");
       empty.className = "modal-lists-empty";
-      empty.textContent = "No lists yet.";
+      empty.textContent = "No lists yet. Create one below.";
       chips.appendChild(empty);
     } else {
       for (const l of lists) {
-        const inList = l.cardIds.includes(c.id);
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "modal-lists-chip" + (inList ? " active" : "");
-        chip.innerHTML = `
-          <span class="modal-lists-chip-check" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          </span>
-          <span>${escapeHtml(l.name)}</span>
+        const qty = collectionLists.quantityIn(l.id, c.id);
+        const row = document.createElement("div");
+        row.className = "modal-list-row" + (qty > 0 ? " active" : "");
+        row.innerHTML = `
+          <span class="modal-list-name">${escapeHtml(l.name)}</span>
+          <div class="modal-list-stepper">
+            <button class="modal-list-btn modal-list-minus" type="button" aria-label="Remove one from ${escapeHtml(l.name)}" ${qty <= 0 ? "disabled" : ""}>−</button>
+            <span class="modal-list-qty">${qty}</span>
+            <button class="modal-list-btn modal-list-plus" type="button" aria-label="Add one to ${escapeHtml(l.name)}">+</button>
+          </div>
         `;
-        chip.addEventListener("click", () => {
-          if (inList) collectionLists.removeCard(l.id, c.id);
-          else collectionLists.addCard(l.id, c);
+        row.querySelector(".modal-list-plus").addEventListener("click", () => {
+          collectionLists.addCard(l.id, c);
           paint();
           syncCardTiles(c.id);
         });
-        chips.appendChild(chip);
+        row.querySelector(".modal-list-minus").addEventListener("click", () => {
+          collectionLists.removeCard(l.id, c.id);
+          paint();
+          syncCardTiles(c.id);
+        });
+        chips.appendChild(row);
       }
     }
 
@@ -1246,6 +1364,7 @@ function renderModalLists(c) {
       const created = collectionLists.create(name);
       collectionLists.addCard(created.id, c);
       paint();
+      syncCardTiles(c.id);
     });
     chips.appendChild(newBtn);
   }
@@ -1359,7 +1478,7 @@ function paintCollectionView() {
     const tab = document.createElement("button");
     tab.type = "button";
     tab.className = "collection-lists-tab" + (activeCollectionListId === l.id ? " active" : "");
-    tab.innerHTML = `<span>${escapeHtml(l.name)}</span><span class="collection-lists-count">${l.cardIds.length}</span>`;
+    tab.innerHTML = `<span>${escapeHtml(l.name)}</span><span class="collection-lists-count">${l.cards.length}</span>`;
     tab.addEventListener("click", () => { activeCollectionListId = l.id; paintCollectionView(); });
     tabs.appendChild(tab);
   }
@@ -1398,7 +1517,7 @@ function paintCollectionView() {
       delBtn.className = "collection-list-action collection-list-action-danger";
       delBtn.textContent = "Delete list";
       delBtn.addEventListener("click", () => {
-        if (!confirm(`Delete list "${active.name}"? Cards stay in your collection.`)) return;
+        if (!confirm(`Delete list "${active.name}"? Its cards will be removed.`)) return;
         collectionLists.delete(active.id);
       });
       meta.appendChild(renameBtn);
@@ -1407,23 +1526,16 @@ function paintCollectionView() {
     }
   }
 
-  // ---- Grid: filter to the active list (or show all)
-  const visible = activeCollectionListId === "all"
-    ? allCards
-    : (() => {
-        const list = lists.find(l => l.id === activeCollectionListId);
-        if (!list) return [];
-        const idSet = new Set(list.cardIds);
-        // Preserve the order the cards were added to the list (newest first).
-        return list.cardIds
-          .map(id => allCards.find(c => c.id === id))
-          .filter(Boolean);
-      })();
+  // ---- Grid: cards for the active list, or aggregate of every list
+  const activeListId = activeCollectionListId === "all" ? null : activeCollectionListId;
+  const visible = activeListId
+    ? (lists.find(l => l.id === activeListId)?.cards || [])
+    : allCards;
 
   grid.innerHTML = "";
   if (!visible.length) {
     empty.textContent = activeCollectionListId === "all"
-      ? "No cards yet. Open a card and add it to your collection."
+      ? "No cards yet. Open a card and add it to a list."
       : "This list is empty. Open a card and add it to this list.";
     empty.classList.remove("hidden");
     return;
@@ -1431,7 +1543,9 @@ function paintCollectionView() {
   empty.classList.add("hidden");
   grid.classList.remove("grid");
   grid.classList.add("tcg-grid");
-  visible.forEach(c => grid.appendChild(makeTcgCardEl(c, { listSource: "collection" })));
+  visible.forEach(c => grid.appendChild(
+    makeTcgCardEl(c, { listSource: "collection", listId: activeListId || undefined })
+  ));
 }
 
 function escapeHtml(s) {
@@ -5112,6 +5226,9 @@ window.addEventListener("DOMContentLoaded", async () => {
 // seed content that another device might have re-uploaded.
 window.addEventListener("cloudsync:change", () => {
   pruneLegacySeedContent();
+  // Pulled-down data may be in the legacy tag-model shape; migrate
+  // before reading anything that depends on the new bag-model.
+  migrateCollectionListsShape();
   refreshCounts();
   refreshAuthUI();
   route();
