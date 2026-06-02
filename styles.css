@@ -440,8 +440,58 @@ button { font: inherit; color: inherit; }
 }
 .modal-lists-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
+}
+.modal-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.modal-list-row.active {
+  background: rgba(192,57,43,0.16);
+  border-color: rgba(192,57,43,0.5);
+}
+.modal-list-name {
+  font-size: 13px;
+  color: var(--fg);
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal-list-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.modal-list-btn {
+  width: 24px; height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-list-btn:hover:not(:disabled) { background: var(--line); }
+.modal-list-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.modal-list-qty {
+  min-width: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
 }
 .modal-lists-chip {
   display: inline-flex;
