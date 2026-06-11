@@ -2919,32 +2919,12 @@ function renderFeed() {
   if (me) {
     ctx.textContent = `Signed in as ${me.name} · ${me.location}`;
   } else {
-    ctx.innerHTML = `<a href="#/profile" class="link">Set up your profile</a> to post and filter by your area.`;
+    ctx.innerHTML = `<a href="#/profile" class="link">Set up your profile</a> to post.`;
   }
-
-  const tabs = document.querySelectorAll("#feed-tabs .tab");
-  let tab = me ? "community" : "all";
-  if (!me) {
-    const ctab = document.querySelector('#feed-tabs .tab[data-tab="community"]');
-    if (ctab) ctab.classList.add("hidden");
-  }
-  tabs.forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
-  tabs.forEach(b => b.addEventListener("click", () => {
-    tab = b.dataset.tab;
-    tabs.forEach(x => x.classList.toggle("active", x === b));
-    paint();
-  }));
 
   if (me) mountCompose(document.getElementById("compose-host"), { groupId: null });
 
-  function paint() {
-    const list = postStore.list().filter(p => !p.groupId);
-    const filtered = tab === "community" && me
-      ? list.filter(p => (p.authorLocation || "").toLowerCase() === me.location.toLowerCase())
-      : list;
-    paintFeed(document.getElementById("feed-list"), document.getElementById("feed-empty"), filtered);
-  }
-  paint();
+  paintFeed(document.getElementById("feed-list"), document.getElementById("feed-empty"), postStore.list());
 }
 
 function paintFeed(host, empty, posts) {
@@ -2986,6 +2966,16 @@ function makePostEl(post, me) {
   creatorChip.className = "creator-chip";
   creatorChip.textContent = "Creator";
   nameRow.appendChild(creatorChip);
+  if (post.groupId) {
+    const g = groupStore.byId(post.groupId);
+    if (g) {
+      const groupChip = document.createElement("a");
+      groupChip.className = "group-chip";
+      groupChip.href = `#/groups/${g.id}`;
+      groupChip.textContent = `Group · ${g.name}`;
+      nameRow.appendChild(groupChip);
+    }
+  }
   (post.editors || []).forEach(n => {
     const chip = document.createElement("span");
     chip.className = "editor-chip";
