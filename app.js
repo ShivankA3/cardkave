@@ -2981,7 +2981,13 @@ function paintFeed(host, empty, posts) {
   }
   empty.classList.add("hidden");
   const me = profileStore.get();
-  posts.forEach(p => host.appendChild(makePostEl(p, me)));
+  // Newest first, regardless of array order — the cloud-sync listener
+  // rewrites feed-posts in Firestore doc-id order (oldest first), so
+  // insertion order can't be trusted after the first sync echo.
+  posts
+    .slice()
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .forEach(p => host.appendChild(makePostEl(p, me)));
 }
 
 // Post ids whose replies section is open — survives the full re-render
