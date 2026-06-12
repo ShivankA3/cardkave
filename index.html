@@ -7,7 +7,15 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://images.pokemontcg.io" crossorigin />
 <link rel="dns-prefetch" href="https://images.pokemontcg.io" />
-<link rel="stylesheet" href="styles.css?v=34" />
+<script>
+  // Apply the saved theme before first paint to avoid a dark-mode flash.
+  try {
+    if (localStorage.getItem("cardkave-theme") === "light") {
+      document.documentElement.dataset.theme = "light";
+    }
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="styles.css?v=35" />
 </head>
 <body>
   <header class="topbar">
@@ -245,6 +253,25 @@
             <button class="btn" type="submit">Save avatar</button>
           </div>
         </form>
+      </details>
+
+      <details class="profile-card">
+        <summary class="profile-card-summary">
+          <span class="profile-card-title">Appearance</span>
+          <span class="profile-card-sub muted">Light or dark theme</span>
+        </summary>
+        <div class="profile-form">
+          <label class="switch-row">
+            <span class="switch-row-text">
+              <span class="switch-row-title">Light mode</span>
+              <span class="field-hint muted">Synced to your account.</span>
+            </span>
+            <span class="switch">
+              <input type="checkbox" id="pf-light-mode" role="switch" aria-label="Light mode" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+        </div>
       </details>
 
       <details class="profile-card">
@@ -819,6 +846,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" defer></script>
   <script src="firebase-config.js?v=1" defer></script>
   <script src="cloud-sync.js?v=3" defer></script>
-  <script src="app.js?v=52" defer></script>
+  <script src="app.js?v=54" defer></script>
 </body>
 </html>
