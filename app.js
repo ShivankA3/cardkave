@@ -2016,6 +2016,14 @@ const postStore = {
     if (i >= 0) p.likes.splice(i, 1); else p.likes.push(name);
     this.save(arr);
   },
+  addReply(id, reply) {
+    const arr = this.list();
+    const p = arr.find(x => x.id === id);
+    if (!p) return;
+    p.replies = p.replies || [];
+    p.replies.push(reply);
+    this.save(arr);
+  },
 };
 
 const groupStore = {
@@ -2976,6 +2984,10 @@ function paintFeed(host, empty, posts) {
   posts.forEach(p => host.appendChild(makePostEl(p, me)));
 }
 
+// Post ids whose replies section is open — survives the full re-render
+// (replaceWith) that likes, edits, and new replies trigger.
+const expandedReplies = new Set();
+
 function makePostEl(post, me) {
   const wrap = document.createElement("article");
   wrap.className = "post";
@@ -3076,6 +3088,21 @@ function makePostEl(post, me) {
   });
   actions.appendChild(likeBtn);
 
+  const replyCount = (post.replies || []).length;
+  const replyBtn = document.createElement("button");
+  replyBtn.type = "button";
+  replyBtn.className = "post-like";
+  replyBtn.innerHTML = `<span class="bubble">💬</span> <span>${replyCount}</span>`;
+  // Signed-out users can still open the thread to read it, but with no
+  // replies and no way to write one the button does nothing — disable it.
+  if (!me && !replyCount) replyBtn.disabled = true;
+  replyBtn.addEventListener("click", () => {
+    if (expandedReplies.has(post.id)) expandedReplies.delete(post.id);
+    else expandedReplies.add(post.id);
+    syncRepliesSection();
+  });
+  actions.appendChild(replyBtn);
+
   if (canEditPost(post, me)) {
     const editBtn = document.createElement("button");
     editBtn.type = "button";
@@ -3122,7 +3149,167 @@ function makePostEl(post, me) {
 
   wrap.appendChild(actions);
 
+  const repliesHost = document.createElement("div");
+  repliesHost.className = "post-replies-host";
+  wrap.appendChild(repliesHost);
+
+  function syncRepliesSection() {
+    replyBtn.classList.toggle("active", expandedReplies.has(post.id));
+    repliesHost.innerHTML = "";
+    if (!expandedReplies.has(post.id)) return;
+    repliesHost.appendChild(makeRepliesSection(post, me, () => {
+      const updated = postStore.byId(post.id);
+      if (updated) wrap.replaceWith(makePostEl(updated, profileStore.get()));
+    }));
+  }
+  syncRepliesSection();
+
   return wrap;
+}
+
+// Replies live as a flat array on the post (post.replies), each with an
+// optional parentId pointing at another reply — null means a direct reply
+// to the post. The thread is rebuilt here for rendering.
+function makeRepliesSection(post, me, onChanged) {
+  const section = document.createElement("div");
+  section.className = "post-replies";
+
+  const replies = (post.replies || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+  const ids = new Set(replies.map(r => r.id));
+  const byParent = new Map();
+  replies.forEach(r => {
+    // A reply whose parent is gone (or never synced) falls back to top level.
+    const key = r.parentId && ids.has(r.parentId) ? r.parentId : null;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(r);
+  });
+
+  if (me) section.appendChild(makeReplyComposer(post, null, me, onChanged));
+
+  const top = byParent.get(null) || [];
+  if (top.length) {
+    const list = document.createElement("div");
+    list.className = "reply-list";
+    top.forEach(r => list.appendChild(makeReplyEl(post, r, me, byParent, 0, onChanged)));
+    section.appendChild(list);
+  } else if (!me) {
+    const hint = document.createElement("p");
+    hint.className = "reply-empty muted";
+    hint.textContent = "No replies yet.";
+    section.appendChild(hint);
+  }
+
+  return section;
+}
+
+function makeReplyEl(post, reply, me, byParent, depth, onChanged) {
+  const el = document.createElement("div");
+  el.className = "reply";
+
+  const row = document.createElement("div");
+  row.className = "reply-row";
+  const av = document.createElement("span");
+  av.className = "avatar avatar-sm";
+  const myProfile = profileStore.get();
+  if (myProfile && reply.authorName === myProfile.name) {
+    paintAvatar(av, myProfile);
+  } else {
+    av.textContent = initials(reply.authorName);
+  }
+  row.appendChild(av);
+
+  const main = document.createElement("div");
+  main.className = "reply-main";
+
+  const head = document.createElement("div");
+  head.className = "reply-head";
+  const name = document.createElement("strong");
+  name.className = "reply-name";
+  name.textContent = reply.authorName;
+  head.appendChild(name);
+  const sub = document.createElement("span");
+  sub.className = "reply-sub muted mono";
+  sub.textContent = relTime(reply.createdAt);
+  head.appendChild(sub);
+  main.appendChild(head);
+
+  const body = document.createElement("p");
+  body.className = "reply-body";
+  body.textContent = reply.content;
+  main.appendChild(body);
+
+  const composerHost = document.createElement("div");
+  composerHost.className = "reply-composer-host";
+
+  if (me) {
+    const replyLink = document.createElement("button");
+    replyLink.type = "button";
+    replyLink.className = "reply-link";
+    replyLink.textContent = "Reply";
+    replyLink.addEventListener("click", () => {
+      if (composerHost.firstChild) { composerHost.innerHTML = ""; return; }
+      composerHost.appendChild(makeReplyComposer(post, reply, me, onChanged));
+      composerHost.querySelector("textarea").focus();
+    });
+    main.appendChild(replyLink);
+  }
+
+  main.appendChild(composerHost);
+  row.appendChild(main);
+  el.appendChild(row);
+
+  const children = byParent.get(reply.id) || [];
+  if (children.length) {
+    const childWrap = document.createElement("div");
+    childWrap.className = "reply-children";
+    children.forEach(c => childWrap.appendChild(makeReplyEl(post, c, me, byParent, depth + 1, onChanged)));
+    // Indent the first few levels under the parent's text column; deeper
+    // threads continue at the same indent so they stay readable on narrow
+    // screens (the guide line still marks them as nested).
+    (depth < 3 ? main : el).appendChild(childWrap);
+  }
+
+  return el;
+}
+
+function makeReplyComposer(post, parentReply, me, onChanged) {
+  const form = document.createElement("form");
+  form.className = "reply-form";
+
+  const ta = document.createElement("textarea");
+  ta.className = "input";
+  ta.required = true;
+  ta.maxLength = 500;
+  ta.rows = 2;
+  ta.placeholder = parentReply ? `Reply to ${parentReply.authorName}…` : "Write a reply…";
+  form.appendChild(ta);
+
+  const actions = document.createElement("div");
+  actions.className = "actions reply-form-actions";
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "btn ghost";
+  submit.textContent = "Reply";
+  actions.appendChild(submit);
+  form.appendChild(actions);
+
+  form.addEventListener("submit", ev => {
+    ev.preventDefault();
+    const text = ta.value.trim();
+    if (!text) return;
+    postStore.addReply(post.id, {
+      id: uid("r"),
+      parentId: parentReply ? parentReply.id : null,
+      authorName: me.name,
+      authorLocation: me.location,
+      content: text,
+      createdAt: Date.now(),
+    });
+    expandedReplies.add(post.id);
+    onChanged && onChanged();
+  });
+
+  return form;
 }
 
 function mountEditPostForm(host, post, onSaved) {
