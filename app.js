@@ -1560,10 +1560,35 @@ const renderCardWishlist = () => renderCardList(
   "wishlist"
 );
 
+// ---- Theme: light/dark, persisted per device. The saved value is also
+// applied by an inline <head> script before first paint to avoid a flash.
+const themeStore = {
+  KEY: "cardkave-theme",
+  get() {
+    try { return localStorage.getItem(this.KEY) === "light" ? "light" : "dark"; }
+    catch { return "dark"; }
+  },
+  set(theme) {
+    try { localStorage.setItem(this.KEY, theme); } catch {}
+    applyTheme(theme);
+  },
+};
+function applyTheme(theme) {
+  if (theme === "light") document.documentElement.dataset.theme = "light";
+  else delete document.documentElement.dataset.theme;
+}
+// Adopt the theme saved on the signed-in profile (synced via Firestore in
+// cloud mode), mirroring it into the device cache the pre-paint script
+// reads. Profiles without a saved theme leave the device preference alone.
+function syncThemeFromProfile() {
+  const t = profileStore.get()?.theme;
+  if ((t === "light" || t === "dark") && t !== themeStore.get()) themeStore.set(t);
+}
+
 // ---- Feed: profile, posts, groups
 const profileStore = {
   get() { try { return JSON.parse(localStorage.getItem("user-profile")); } catch { return null; } },
-  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); cloudPush("user-profile", p); refreshProfileNav(); },
+  set(p) { localStorage.setItem("user-profile", JSON.stringify(p)); cloudPush("user-profile", p); refreshProfileNav(); syncThemeFromProfile(); },
   isPaid() { return !!this.get()?.isPaid; },
 };
 
@@ -1636,6 +1661,7 @@ const authStore = {
         favoriteType: acc.favoriteType || "",
         avatarColor: acc.avatarColor || "",
         initials: acc.initials || "",
+        theme: acc.theme || "",
       });
     }
     refreshAuthUI();
@@ -1787,6 +1813,7 @@ const authStore = {
       if (patch.avatarColor  != null) cloudPatch.avatarColor  = patch.avatarColor;
       if (patch.initials     != null) cloudPatch.initials     = patch.initials;
       if (patch.email        != null) cloudPatch.email        = patch.email;
+      if (patch.theme        != null) cloudPatch.theme        = patch.theme;
       cloudSync.updateProfile(cloudPatch).then(() => {
         const merged = { ...(profileStore.get() || {}), ...cloudPatch };
         profileStore.set(merged);
@@ -1811,6 +1838,7 @@ const authStore = {
       favoriteType: arr[i].favoriteType || "",
       avatarColor: arr[i].avatarColor || "",
       initials: arr[i].initials || "",
+      theme: arr[i].theme || "",
     });
     return arr[i];
   },
@@ -2334,6 +2362,16 @@ function renderProfile() {
     });
     paintHeader();
     showFlash("Avatar updated.");
+  });
+
+  // ---- Appearance (theme toggle)
+  const lightToggle = document.getElementById("pf-light-mode");
+  lightToggle.checked = themeStore.get() === "light";
+  lightToggle.addEventListener("change", () => {
+    const theme = lightToggle.checked ? "light" : "dark";
+    themeStore.set(theme);
+    authStore.updateCurrent({ theme });
+    showFlash(lightToggle.checked ? "Light mode on." : "Dark mode on.");
   });
 
   // ---- Email form
@@ -5195,6 +5233,7 @@ function route() {
 
 window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", async () => {
+  applyTheme(themeStore.get());
   initEmailService();
   // If cloud sync is on, wait for the first auth state to resolve so we
   // don't bounce a logged-in user to /login while Firebase loads their
@@ -5202,6 +5241,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   if (window.cloudSync && cloudSync.enabled) {
     try { await cloudSync.ready; } catch {}
   }
+  syncThemeFromProfile();
   pruneLegacySeedContent();
   refreshCounts();
   refreshAuthUI();
@@ -5215,6 +5255,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 // current view so other devices' edits show up live. Also re-prune any
 // seed content that another device might have re-uploaded.
 window.addEventListener("cloudsync:change", () => {
+  syncThemeFromProfile();
   pruneLegacySeedContent();
   // Pulled-down data may be in the legacy tag-model shape; migrate
   // before reading anything that depends on the new bag-model.
