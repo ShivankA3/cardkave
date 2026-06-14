@@ -320,7 +320,18 @@
     const provider = new firebase.auth.GoogleAuthProvider();
     provider.addScope("email");
     provider.addScope("profile");
-    const cred = await auth.signInWithPopup(provider);
+    // Inside the native iOS wrapper, signInWithPopup is blocked by WKWebView, so
+    // sign in with a credential from the native Google flow instead (the wrapper
+    // exposes these globals; see ios/CardKave/GoogleSignIn.swift). On the web
+    // these globals are undefined and the normal popup is used.
+    let cred;
+    if (window.__cardkaveHasNativeGoogle && window.__cardkaveNativeGoogleSignIn) {
+      const { idToken, accessToken } = await window.__cardkaveNativeGoogleSignIn();
+      const credential = firebase.auth.GoogleAuthProvider.credential(idToken, accessToken || null);
+      cred = await auth.signInWithCredential(credential);
+    } else {
+      cred = await auth.signInWithPopup(provider);
+    }
     // For brand-new Google accounts, seed the profile doc. We also report
     // isNew back to the caller so the UI can route the user to the signup-
     // completion page where they enter display name + city/area, matching

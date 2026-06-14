@@ -1,0 +1,13 @@
+# Xcode user state & build artifacts
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.moved-aside
+.DS_Store
+
+# The web app is copied into the app bundle at build time from the repo root
+# (see the "Copy CardKave Web Assets" build phase), so there is no committed
+# duplicate to ignore — this is just a guard in case one is generated.
+CardKave/www/
