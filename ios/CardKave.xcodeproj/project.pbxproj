@@ -299,6 +299,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "CardKave can use the camera to add photos to your cards.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "CardKave serves the app from a local server on your device.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "CardKave can use your photo library to add images to your cards.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -329,6 +330,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "CardKave can use the camera to add photos to your cards.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "CardKave serves the app from a local server on your device.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "CardKave can use your photo library to add images to your cards.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
