@@ -1,115 +1,134 @@
+import Darwin
 import Foundation
-import Network
 import UniformTypeIdentifiers
 
 /// A tiny embedded HTTP/1.1 server that serves the bundled `www` directory on
 /// 127.0.0.1.
 ///
-/// Why not a custom `cardkave://` URL scheme? The web app uses Firebase Auth,
-/// whose initialization only completes on an **authorized domain**. A custom
-/// scheme isn't one, so Firebase's first `onAuthStateChanged` never fires, the
-/// app's boot `await cloudSync.ready` hangs, and the router never runs (blank
-/// screen). Serving over `http://localhost` — which Firebase authorizes by
-/// default — makes the app behave exactly as it does on the website, while
-/// still bundling the local code so you can test your own changes. Needs no
-/// third-party dependencies (built on Network.framework).
+/// Why a raw BSD socket instead of Network.framework's `NWListener`? On a real
+/// device, `NWListener` goes through iOS's local-network privacy layer, which
+/// terminates the app (`abort_with_payload`) when used without the right
+/// declaration — even for loopback. A POSIX socket explicitly bound to the
+/// loopback address `127.0.0.1` is exempt from local-network privacy, so it
+/// runs the same on the simulator and on device, with no prompt and no crash.
+///
+/// Why a local server at all? The web app uses Firebase Auth, which only
+/// initializes on an authorized domain — `localhost` is authorized by default,
+/// a `file://` / custom-scheme origin is not — so loading any other way leaves
+/// the app stuck on a blank screen during boot.
 final class LocalServer {
     private let root: URL
-    private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.cardkave.localserver", attributes: .concurrent)
+    private var serverFD: Int32 = -1
     private(set) var port: UInt16 = 0
     private var ready = false
+    private let lock = NSLock()
+    private let acceptQueue = DispatchQueue(label: "com.cardkave.localserver.accept")
+    private let ioQueue = DispatchQueue(label: "com.cardkave.localserver.io", attributes: .concurrent)
 
-    /// Whether the listener is currently accepting connections.
-    var isReady: Bool { ready }
+    /// Whether the server is currently listening.
+    var isReady: Bool { lock.lock(); defer { lock.unlock() }; return ready }
 
-    init(root: URL) { self.root = root.standardizedFileURL }
-
-    /// Starts listening on a free loopback port and calls `onReady(port)` on the
-    /// main queue once the server is accepting connections.
-    func start(onReady: @escaping (UInt16) -> Void) {
-        if ready, port != 0 { onReady(port); return }
-        bootstrap(onReady: onReady)
+    init(root: URL) {
+        self.root = root.standardizedFileURL
+        // Never let a write to a closed client socket raise SIGPIPE (which would
+        // crash the app); we also set SO_NOSIGPIPE per connection below.
+        signal(SIGPIPE, SIG_IGN)
     }
 
-    /// Ensures the server is listening — iOS tears the loopback listener down
-    /// while the app is suspended, so after returning to the foreground we may
-    /// need to start a fresh one. Reports the port and whether a restart was
-    /// required (so the caller can reload the web view onto the new port).
+    /// Starts the server (if not already running) and calls `onReady(port)` on
+    /// the main queue once it is listening.
+    func start(onReady: @escaping (UInt16) -> Void) {
+        if isReady, port != 0 { onReady(port); return }
+        bootstrap { port in DispatchQueue.main.async { onReady(port) } }
+    }
+
+    /// Ensures the server is listening — iOS closes the socket while the app is
+    /// suspended, so after returning to the foreground we may need a fresh one.
+    /// Reports the port and whether a restart was required (so the caller can
+    /// reload the web view onto the new port).
     func ensureRunning(_ completion: @escaping (_ port: UInt16, _ didRestart: Bool) -> Void) {
-        if ready, port != 0 { completion(port, false); return }
-        listener?.cancel()
-        listener = nil
-        bootstrap { port in completion(port, true) }
+        if isReady, port != 0 { completion(port, false); return }
+        stop()
+        bootstrap { port in DispatchQueue.main.async { completion(port, true) } }
+    }
+
+    private func stop() {
+        lock.lock()
+        ready = false
+        let fd = serverFD
+        serverFD = -1
+        lock.unlock()
+        if fd >= 0 { close(fd) }
     }
 
     private func bootstrap(onReady: @escaping (UInt16) -> Void) {
-        do {
-            let params = NWParameters.tcp
-            params.allowLocalEndpointReuse = true
-            params.requiredInterfaceType = .loopback
-            let listener = try NWListener(using: params)
-            self.listener = listener
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.accept(connection)
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { NSLog("CKSERVER: socket() failed errno=\(errno)"); return }
+
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0                                // let the OS pick a free port
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")   // loopback only — privacy-exempt
+
+        let didBind = withUnsafePointer(to: &addr) { raw in
+            raw.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
-            var firedReady = false
-            listener.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready:
-                    self?.ready = true
-                    let port = listener.port?.rawValue ?? 0
-                    self?.port = port
-                    if !firedReady { firedReady = true; DispatchQueue.main.async { onReady(port) } }
-                case .failed(let error):
-                    self?.ready = false
-                    NSLog("CKSERVER: listener failed: \(error)")
-                case .cancelled:
-                    self?.ready = false
-                default:
-                    break
-                }
+        }
+        guard didBind == 0 else { NSLog("CKSERVER: bind failed errno=\(errno)"); close(fd); return }
+        guard listen(fd, 16) == 0 else { NSLog("CKSERVER: listen failed errno=\(errno)"); close(fd); return }
+
+        var name = sockaddr_in()
+        var nameLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let chosenPort: UInt16 = withUnsafeMutablePointer(to: &name) { raw in
+            raw.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in _ = getsockname(fd, sa, &nameLen) }
+            return UInt16(bigEndian: raw.pointee.sin_port)
+        }
+
+        lock.lock(); serverFD = fd; port = chosenPort; ready = true; lock.unlock()
+        onReady(chosenPort)
+        acceptQueue.async { [weak self] in self?.acceptLoop(fd) }
+    }
+
+    private func acceptLoop(_ fd: Int32) {
+        while true {
+            let client = accept(fd, nil, nil)
+            if client < 0 {
+                if errno == EINTR { continue }
+                break  // server socket was closed
             }
-            listener.start(queue: queue)
-        } catch {
-            NSLog("CKSERVER: failed to start: \(error)")
+            var noSigpipe: Int32 = 1
+            setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+            ioQueue.async { [weak self] in self?.handle(client) }
         }
     }
 
-    private func accept(_ connection: NWConnection) {
-        connection.start(queue: queue)
-        readRequest(connection, buffer: Data())
-    }
+    private func handle(_ fd: Int32) {
+        defer { close(fd) }
 
-    /// Accumulates bytes until the end of the HTTP request headers, then serves.
-    private func readRequest(_ connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self = self else { connection.cancel(); return }
-            var buffer = buffer
-            if let data = data { buffer.append(data) }
-
-            if let range = buffer.firstRange(of: Data("\r\n\r\n".utf8)) {
-                let head = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
-                self.serve(connection, requestHead: head)
-                return
-            }
-            if error != nil || isComplete || buffer.count > 1_000_000 {
-                self.send(connection, status: 400, headers: [:], body: Data("Bad Request".utf8))
-                return
-            }
-            self.readRequest(connection, buffer: buffer)
+        // Read until the end of the request headers (GET/HEAD have no body).
+        var request = Data()
+        let terminator = Data("\r\n\r\n".utf8)
+        var buffer = [UInt8](repeating: 0, count: 8192)
+        while request.range(of: terminator) == nil {
+            let n = recv(fd, &buffer, buffer.count, 0)
+            if n <= 0 { return }
+            request.append(contentsOf: buffer[0..<n])
+            if request.count > 1_000_000 { return }
         }
-    }
 
-    private func serve(_ connection: NWConnection, requestHead: Data) {
-        guard let text = String(data: requestHead, encoding: .utf8),
-              let requestLine = text.split(separator: "\r\n", omittingEmptySubsequences: false).first else {
-            send(connection, status: 400, headers: [:], body: Data("Bad Request".utf8)); return
+        guard let headEnd = request.range(of: terminator),
+              let head = String(data: request.subdata(in: request.startIndex..<headEnd.lowerBound), encoding: .utf8),
+              let requestLine = head.split(separator: "\r\n", omittingEmptySubsequences: false).first else {
+            writeResponse(fd, status: 400, headers: [:], body: Data("Bad Request".utf8)); return
         }
+
         let tokens = requestLine.split(separator: " ")
-        guard tokens.count >= 2 else {
-            send(connection, status: 400, headers: [:], body: Data()); return
-        }
+        guard tokens.count >= 2 else { writeResponse(fd, status: 400, headers: [:], body: Data()); return }
         let method = String(tokens[0])
         var path = String(tokens[1])
         if let cut = path.firstIndex(where: { $0 == "?" || $0 == "#" }) {
@@ -121,25 +140,25 @@ final class LocalServer {
         let fileURL = root.appendingPathComponent(relative).standardizedFileURL
 
         guard fileURL.path == root.path || fileURL.path.hasPrefix(root.path + "/") else {
-            send(connection, status: 403, headers: ["Content-Type": "text/plain"], body: Data("Forbidden".utf8)); return
+            writeResponse(fd, status: 403, headers: ["Content-Type": "text/plain"], body: Data("Forbidden".utf8)); return
         }
         guard method == "GET" || method == "HEAD" else {
-            send(connection, status: 405, headers: ["Allow": "GET, HEAD"], body: Data()); return
+            writeResponse(fd, status: 405, headers: ["Allow": "GET, HEAD"], body: Data()); return
         }
         guard let data = try? Data(contentsOf: fileURL) else {
-            send(connection, status: 404, headers: ["Content-Type": "text/plain"],
-                 body: Data("Not found: \(relative)".utf8)); return
+            writeResponse(fd, status: 404, headers: ["Content-Type": "text/plain"],
+                          body: Data("Not found: \(relative)".utf8)); return
         }
         let headers = [
             "Content-Type": Self.mimeType(forExtension: fileURL.pathExtension),
             "Cache-Control": "no-cache",
         ]
-        send(connection, status: 200, headers: headers,
-             body: method == "HEAD" ? Data() : data, declaredLength: data.count)
+        writeResponse(fd, status: 200, headers: headers,
+                      body: method == "HEAD" ? Data() : data, declaredLength: data.count)
     }
 
-    private func send(_ connection: NWConnection, status: Int, headers: [String: String],
-                      body: Data, declaredLength: Int? = nil) {
+    private func writeResponse(_ fd: Int32, status: Int, headers: [String: String],
+                               body: Data, declaredLength: Int? = nil) {
         var response = "HTTP/1.1 \(status) \(Self.reasonPhrase(status))\r\n"
         var headers = headers
         headers["Content-Length"] = String(declaredLength ?? body.count)
@@ -148,9 +167,19 @@ final class LocalServer {
         response += "\r\n"
         var out = Data(response.utf8)
         out.append(body)
-        connection.send(content: out, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        writeAll(fd, out)
+    }
+
+    private func writeAll(_ fd: Int32, _ data: Data) {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress, raw.count > 0 else { return }
+            var sent = 0
+            while sent < raw.count {
+                let n = send(fd, base + sent, raw.count - sent, 0)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
     }
 
     private static func reasonPhrase(_ status: Int) -> String {
