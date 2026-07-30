@@ -4,7 +4,7 @@ rules_version = '2';
 //
 // v1 trade-offs (intentionally permissive — see SETUP_FIREBASE.md):
 //   - Per-user data is locked tight: only the owning user can read or write.
-//   - Shared collections (posts, groups, events, trades, decks, templates):
+//   - Shared collections (posts, groups, events, trades, templates):
 //     any signed-in user can read AND write any document. This matches the
 //     current app's behavior (likes, joins, attendance, trade replies all
 //     mutate other users' docs). Tightening to per-field rules is left as
@@ -34,7 +34,8 @@ service cloud.firestore {
     match /groups/{groupId}                  { allow read, write: if request.auth != null; }
     match /events/{eventId}                  { allow read, write: if request.auth != null; }
     match /trades/{tradeId}                  { allow read, write: if request.auth != null; }
-    match /decks/{deckId}                    { allow read, write: if request.auth != null; }
+    // Decks are now per-user under /users/{uid}/data/decks (see rule above);
+    // there is no shared decks collection.
     match /verifiedEventTemplates/{tplId}    { allow read, write: if request.auth != null; }
 
     // ── Public trade profiles ───────────────────────────────────────

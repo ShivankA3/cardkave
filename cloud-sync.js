@@ -5,7 +5,7 @@
 //   - When the user is signed in, every store.save() in app.js calls
 //     cloudSync.push(KEY, value) which mirrors the write to Firestore.
 //   - Realtime listeners on shared collections (posts, groups, events,
-//     trades, decks, templates) push remote changes back into localStorage
+//     trades, templates) push remote changes back into localStorage
 //     and dispatch "cloudsync:change" so the UI re-renders.
 //   - On first sign-in, if the cloud is empty for a key but localStorage
 //     has data, we push the local data up (one-time merge). Otherwise the
@@ -44,6 +44,12 @@
     "collection-cards": { doc: "collection",    shape: "array", field: "cards" },
     "wishlist-cards":   { doc: "wishlist",      shape: "array", field: "cards" },
     "collection-lists": { doc: "collectionLists", shape: "array", field: "lists" },
+    // Decks are private to their creator. Storing them under the user's own
+    // doc means one user's decks never sync to anyone else. sanitizeLocal
+    // drops decks that leaked into localStorage from the old shared `decks`
+    // collection (and belong to someone else) before this user's local set is
+    // pushed up to their doc.
+    "decks":            { doc: "decks", shape: "array", field: "decks", sanitizeLocal: keepOwnDecks },
   };
 
   // Shared: one Firestore doc per array item, top-level collection.
@@ -53,9 +59,27 @@
     "feed-groups":              { col: "groups" },
     "feed-events":              { col: "events" },
     "trades":                   { col: "trades" },
-    "decks":                    { col: "decks" },
     "verified-event-templates": { col: "verifiedEventTemplates", primitive: true },
   };
+
+  // Keep only decks that belong to the signed-in user. Decks created after the
+  // per-user migration carry an ownerUid. Legacy decks (created before the
+  // field existed) are matched by the creator's display name and stamped with
+  // the uid so they stay attributed going forward; anything else is dropped.
+  function keepOwnDecks(arr, user) {
+    if (!Array.isArray(arr)) return [];
+    const uid = user.uid;
+    const name = user.displayName
+      || (safeParse(localStorage.getItem("user-profile")) || {}).name
+      || null;
+    const out = [];
+    for (const d of arr) {
+      if (!d) continue;
+      if (d.ownerUid) { if (d.ownerUid === uid) out.push(d); continue; }
+      if (name && d.ownerName === name) out.push({ ...d, ownerUid: uid });
+    }
+    return out;
+  }
 
   // Public trade profiles — each user owns the doc keyed by their uid.
   // Anyone signed in can read every profile (so we can compute matches),
@@ -147,7 +171,13 @@
       const ref = userRef(user.uid, schema.doc);
       const snap = await ref.get();
       const localRaw = localStorage.getItem(key);
-      const local = localRaw == null ? null : safeParse(localRaw);
+      let local = localRaw == null ? null : safeParse(localRaw);
+      // Drop any items that leaked in from a previously-shared collection and
+      // don't belong to this user before we merge/push them up.
+      if (local != null && schema.sanitizeLocal) {
+        local = schema.sanitizeLocal(local, user);
+        localStorage.setItem(key, JSON.stringify(local));
+      }
       if (snap.exists) {
         const data = snap.data();
         const cloudValue = schema.shape === "array" ? (data[schema.field] || []) : data;

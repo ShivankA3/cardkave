@@ -426,7 +426,7 @@ function refreshCounts() {
     if (me) {
       try {
         const decks = JSON.parse(localStorage.getItem("decks")) || [];
-        count = decks.filter(d => d.ownerName === me.name).length;
+        count = decks.filter(deckOwnedByMe).length;
       } catch {}
     }
     decksEl.textContent = count;
@@ -4933,8 +4933,19 @@ const deckStore = {
     const arr = this.list().filter(d => d.id !== id);
     this.save(arr);
   },
-  forUser(name) { return this.list().filter(d => d.ownerName === name); },
+  mine() { return this.list().filter(deckOwnedByMe); },
 };
+
+// A deck belongs to the signed-in user when its ownerUid matches. Decks
+// created before ownerUid existed fall back to a display-name match (also
+// covers local-only mode, where there is no uid).
+function deckOwnedByMe(d) {
+  if (!d) return false;
+  const uid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  if (d.ownerUid) return !!uid && d.ownerUid === uid;
+  const me = profileStore.get();
+  return !!(me && me.name && d.ownerName === me.name);
+}
 
 function totalCardCount(deck) {
   return (deck.cards || []).reduce((s, c) => s + (c.quantity || 0), 0);
@@ -5083,7 +5094,7 @@ function renderDecks() {
     return;
   }
 
-  const myDecks = deckStore.forUser(me.name);
+  const myDecks = deckStore.mine();
 
   ctx.textContent = "Build, save, and export decklists as PDF.";
 
@@ -5098,6 +5109,7 @@ function renderDecks() {
       if (!name) return;
       const d = {
         id: uid("d"),
+        ownerUid: (window.cloudSync && window.cloudSync.currentUid) || null,
         ownerName: me.name,
         ownerLocation: me.location,
         name, description: desc,
@@ -5182,8 +5194,7 @@ function renderDeck(id) {
 function paintDeckDetail(id) {
   const deck = deckStore.byId(id);
   if (!deck) return;
-  const me = profileStore.get();
-  const isOwner = !!(me && me.name === deck.ownerName);
+  const isOwner = deckOwnedByMe(deck);
 
   document.getElementById("deck-name").textContent = deck.name;
   const total = totalCardCount(deck);
