@@ -1565,8 +1565,8 @@ const renderCardWishlist = () => renderCardList(
 const themeStore = {
   KEY: "cardkave-theme",
   get() {
-    try { return localStorage.getItem(this.KEY) === "light" ? "light" : "dark"; }
-    catch { return "dark"; }
+    try { return localStorage.getItem(this.KEY) === "dark" ? "dark" : "light"; }
+    catch { return "light"; }
   },
   set(theme) {
     try { localStorage.setItem(this.KEY, theme); } catch {}
@@ -1574,7 +1574,7 @@ const themeStore = {
   },
 };
 function applyTheme(theme) {
-  if (theme === "light") document.documentElement.dataset.theme = "light";
+  if (theme === "dark") document.documentElement.dataset.theme = "dark";
   else delete document.documentElement.dataset.theme;
 }
 // Adopt the theme saved on the signed-in profile (synced via Firestore in
@@ -2374,12 +2374,12 @@ function renderProfile() {
 
   // ---- Appearance (theme toggle)
   const lightToggle = document.getElementById("pf-light-mode");
-  lightToggle.checked = themeStore.get() === "light";
+  lightToggle.checked = themeStore.get() === "dark";
   lightToggle.addEventListener("change", () => {
-    const theme = lightToggle.checked ? "light" : "dark";
+    const theme = lightToggle.checked ? "dark" : "light";
     themeStore.set(theme);
     authStore.updateCurrent({ theme });
-    showFlash(lightToggle.checked ? "Light mode on." : "Dark mode on.");
+    showFlash(lightToggle.checked ? "Dark mode on." : "Light mode on.");
   });
 
   // ---- Email form

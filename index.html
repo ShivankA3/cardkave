@@ -4,18 +4,22 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>CardKave</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%231a1420'/%3E%3Cpath d='M2 16a14 14 0 0 1 28 0z' fill='%23ea5138'/%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%231a1420' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23fffcf5' stroke='%231a1420' stroke-width='3'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://images.pokemontcg.io" crossorigin />
 <link rel="dns-prefetch" href="https://images.pokemontcg.io" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800;900&display=swap" />
 <script>
-  // Apply the saved theme before first paint to avoid a dark-mode flash.
+  // Apply the saved theme before first paint to avoid a theme flash. The
+  // cream "flyer" theme is the default; dark mode is opt-in per device.
   try {
-    if (localStorage.getItem("cardkave-theme") === "light") {
-      document.documentElement.dataset.theme = "light";
+    if (localStorage.getItem("cardkave-theme") === "dark") {
+      document.documentElement.dataset.theme = "dark";
     }
   } catch (e) {}
 </script>
-<link rel="stylesheet" href="styles.css?v=35" />
+<link rel="stylesheet" href="styles.css?v=36" />
 </head>
 <body>
   <header class="topbar">
@@ -263,11 +267,11 @@
         <div class="profile-form">
           <label class="switch-row">
             <span class="switch-row-text">
-              <span class="switch-row-title">Light mode</span>
+              <span class="switch-row-title">Dark mode</span>
               <span class="field-hint muted">Synced to your account.</span>
             </span>
             <span class="switch">
-              <input type="checkbox" id="pf-light-mode" role="switch" aria-label="Light mode" />
+              <input type="checkbox" id="pf-light-mode" role="switch" aria-label="Dark mode" />
               <span class="switch-track" aria-hidden="true"></span>
             </span>
           </label>
@@ -846,6 +850,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" defer></script>
   <script src="firebase-config.js?v=1" defer></script>
   <script src="cloud-sync.js?v=3" defer></script>
-  <script src="app.js?v=54" defer></script>
+  <script src="app.js?v=55" defer></script>
 </body>
 </html>
