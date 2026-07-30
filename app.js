@@ -401,8 +401,12 @@ const view = document.getElementById("view");
 const tpl = id => document.getElementById(id).content.cloneNode(true);
 
 function refreshCounts() {
-  document.getElementById("count-collection").textContent = collectionCards.totalCount();
-  document.getElementById("count-wishlist").textContent = wishlistCards.totalCount();
+  const collEl = document.getElementById("count-collection");
+  if (collEl) collEl.textContent = collectionCards.totalCount();
+  // The wishlist count now lives on the Collection sub-tab rather than the
+  // top nav, so its element may be absent depending on the current view.
+  const wishEl = document.getElementById("count-wishlist");
+  if (wishEl) wishEl.textContent = wishlistCards.totalCount();
   const me = (() => { try { return JSON.parse(localStorage.getItem("user-profile")); } catch { return null; } })();
   const tradesEl = document.getElementById("count-trades");
   if (tradesEl) {
@@ -433,10 +437,57 @@ function refreshCounts() {
   }
 }
 
+// Several standalone routes now live under a single top-nav entry. This maps
+// a page's own route key to the primary nav item that should light up for it.
+const NAV_GROUP = {
+  wishlist: "collection",
+  feed: "community",
+  groups: "community",
+  events: "community",
+};
+
+// Secondary tab strips for the consolidated nav entries. A single top-nav
+// item ("Collection", "Community") fans out into these sibling routes without
+// crowding the primary nav.
+const NAV_SUBTABS = {
+  collection: [
+    { key: "collection", label: "Collection", hash: "#/collection" },
+    { key: "wishlist", label: "Wishlist", hash: "#/wishlist" },
+  ],
+  community: [
+    { key: "feed", label: "Feed", hash: "#/feed" },
+    { key: "groups", label: "Groups", hash: "#/groups" },
+    { key: "events", label: "Events", hash: "#/events" },
+  ],
+};
+
 function setActiveNav(route) {
+  const navKey = NAV_GROUP[route] || route;
   document.querySelectorAll(".nav a").forEach(a => {
-    a.classList.toggle("active", a.dataset.route === route);
+    a.classList.toggle("active", a.dataset.route === navKey);
   });
+}
+
+// Insert the sub-tab strip for a consolidated group at the top of the current
+// view's section. `activeKey` is the route currently being shown.
+function mountSubtabs(activeKey) {
+  const groupKey = NAV_GROUP[activeKey] || activeKey;
+  const items = NAV_SUBTABS[groupKey];
+  if (!items) return;
+  const section = view.querySelector("section");
+  if (!section) return;
+  const bar = document.createElement("nav");
+  bar.className = "subtabs";
+  bar.setAttribute("aria-label", `${groupKey} sections`);
+  items.forEach(it => {
+    const a = document.createElement("a");
+    a.className = "subtab" + (it.key === activeKey ? " active" : "");
+    a.href = it.hash;
+    a.textContent = it.label;
+    if (it.key === activeKey) a.setAttribute("aria-current", "page");
+    bar.appendChild(a);
+  });
+  section.insertBefore(bar, section.firstChild);
 }
 
 function idFromUrl(url) {
@@ -1392,6 +1443,7 @@ function renderCardList(store, route, title, emptyMsg, listSource) {
   setActiveNav(route);
   view.innerHTML = "";
   view.appendChild(tpl("tpl-list"));
+  mountSubtabs(route);
   document.getElementById("list-title").textContent = title;
 
   const cards = store.list();
@@ -1421,6 +1473,7 @@ function renderCollection() {
   setActiveNav("collection");
   view.innerHTML = "";
   view.appendChild(tpl("tpl-list"));
+  mountSubtabs("collection");
   document.getElementById("list-title").textContent = "Collection";
 
   // Insert the lists toolbar right after the title.
@@ -1958,8 +2011,6 @@ function humanFirebaseError(e) {
 function refreshAuthUI() {
   refreshProfileNav();
   refreshCounts();
-  const out = document.getElementById("nav-signout");
-  if (out) out.classList.toggle("hidden", !authStore.isAuthed());
 }
 
 // Top-level logout. Clears the local session, asks Google to forget the user,
@@ -2382,149 +2433,19 @@ function renderProfile() {
     showFlash(lightToggle.checked ? "Dark mode on." : "Light mode on.");
   });
 
-  // ---- Email form
-  const emailInp = document.getElementById("pf-email");
-  const newEmailInp = document.getElementById("pf-new-email");
-  const emailMsg = document.getElementById("email-msg");
-  emailInp.value = acc.email;
-
-  function showEmailMsg(msg, kind = "error") {
-    emailMsg.textContent = msg;
-    emailMsg.classList.remove("hidden");
-    emailMsg.classList.toggle("auth-error", kind === "error");
-  }
-  function clearEmailMsg() {
-    emailMsg.textContent = "";
-    emailMsg.classList.add("hidden");
-  }
-
-  document.getElementById("email-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    clearEmailMsg();
-    const next = newEmailInp.value.trim();
-    if (!isValidEmail(next)) return showEmailMsg("Enter a valid email address.");
-    const a = authStore.current();
-    if (a && next.toLowerCase() === a.email) return showEmailMsg("That's already your email.");
-
-    // Cloud mode: let Firebase send a real verification link to the new
-    // address. The email only switches after the user clicks the link.
-    if (cloudSync.enabled) {
-      try {
-        await authStore.changeEmail(next);
-        newEmailInp.value = "";
-        showFlash(`Verification email sent to ${next}. Click the link to switch your email.`);
-      } catch (err) {
-        showEmailMsg(err.message || "Couldn't send verification email.");
-      }
-      return;
-    }
-
-    // Local mode: send a 6-digit code via EmailJS, verify, then switch.
-    if (authStore.findByEmail(next)) return showEmailMsg("Another account already uses that email.");
-    openCodeModal({
-      title: "Confirm your new email",
-      intro: `We're sending a 6-digit code to ${next}.`,
-      email: next,
-      purpose: "email change",
-      onVerified: async () => {
-        try {
-          await authStore.changeEmail(next);
-          newEmailInp.value = "";
-          emailInp.value = next;
-          paintHeader();
-          showFlash(`Email updated to ${next}.`);
-        } catch (err) {
-          showEmailMsg(err.message || "Couldn't change email.");
-        }
-      },
-    });
-  });
-
-  // ---- Password form
-  const passwordCard = document.getElementById("password-card");
+  // ---- Email / Password / Delete: these now open dedicated guided flows
+  // (#/change-email, #/reset-password, #/delete-account). Only the sign-in
+  // password differs by provider — Google accounts have none to reset.
+  const resetLink = document.getElementById("reset-password-link");
   const passwordSub = document.getElementById("pf-password-sub");
-  const currentPw = document.getElementById("pf-current-pw");
-  const newPw = document.getElementById("pf-new-pw");
-  const confirmPw = document.getElementById("pf-confirm-pw");
-  const passwordMsg = document.getElementById("password-msg");
-  const passwordSubmit = document.getElementById("password-submit");
-  const resetLinkBtn = document.getElementById("password-reset-link");
-
   if (acc.provider !== "email") {
-    passwordSub.textContent = `Managed by Google — no password to change.`;
-    [currentPw, newPw, confirmPw, passwordSubmit].forEach(el => { el.disabled = true; });
-    resetLinkBtn.disabled = true;
+    passwordSub.textContent = "Managed by Google — no password to change.";
+    resetLink.setAttribute("aria-disabled", "true");
+    resetLink.removeAttribute("href");
   }
-
-  function showPwMsg(msg, kind = "error") {
-    passwordMsg.textContent = msg;
-    passwordMsg.classList.remove("hidden");
-    passwordMsg.classList.toggle("auth-error", kind === "error");
-  }
-  function clearPwMsg() {
-    passwordMsg.textContent = "";
-    passwordMsg.classList.add("hidden");
-  }
-
-  document.getElementById("password-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    clearPwMsg();
-    if (acc.provider !== "email") return;
-    if (newPw.value !== confirmPw.value) return showPwMsg("New passwords don't match.");
-    passwordSubmit.disabled = true;
-    passwordSubmit.textContent = "Updating…";
-    try {
-      await authStore.changePassword({ currentPassword: currentPw.value, newPassword: newPw.value });
-      currentPw.value = ""; newPw.value = ""; confirmPw.value = "";
-      showFlash("Password updated.");
-    } catch (err) {
-      showPwMsg(err.message || "Couldn't update password.");
-    } finally {
-      passwordSubmit.disabled = false;
-      passwordSubmit.textContent = "Update password";
-    }
-  });
-
-  resetLinkBtn.addEventListener("click", async () => {
-    if (acc.provider !== "email") return;
-    if (cloudSync.enabled) {
-      // Firebase sends a real reset link; the user clicks it to choose a new
-      // password on Firebase's hosted page.
-      try {
-        await authStore.sendCloudPasswordReset();
-        showFlash(`Reset link sent to ${acc.email}. Check your inbox.`);
-      } catch (err) {
-        showFlash(err.message || "Couldn't send reset link.", "error");
-      }
-      return;
-    }
-    openCodeModal({
-      title: "Reset your password",
-      intro: `We're sending a 6-digit code to ${acc.email}.`,
-      email: acc.email,
-      purpose: "password reset",
-      onVerified: () => {
-        const next = window.prompt("Choose a new password (at least 6 characters)");
-        if (next == null) return;
-        authStore.setPasswordViaReset(next).then(() => {
-          showFlash("Password reset — you can sign in with the new password.");
-        }).catch(err => showFlash(err.message || "Couldn't reset password.", "error"));
-      },
-    });
-  });
 
   // ---- Account
   document.getElementById("profile-signout").addEventListener("click", () => logout());
-  document.getElementById("profile-delete").addEventListener("click", async () => {
-    if (!window.confirm("Delete your CardKave account? This signs you out and removes your login. Local card data stays in this browser.")) return;
-    try {
-      await authStore.deleteCurrent();
-      window.location.hash = "#/login";
-    } catch (err) {
-      // Firebase requires recent reauth for deletion — surface that clearly.
-      showFlash(err.message || "Couldn't delete account.", "error");
-    }
-  });
 
   paintHeader();
 }
@@ -2653,6 +2574,431 @@ function openCodeModal({ title, intro, email, purpose, onVerified }) {
   codeInp.addEventListener("keydown", onKey);
 
   sendCode(true);
+}
+
+// ---- Guided account flows (wizards) ----
+// Shared scaffold for the step-by-step account pages (password reset, email
+// change, deletion). Renders the shell — back link, header, progress stepper,
+// and an empty panel — and returns handles the caller drives per step.
+function buildWizard({ title, sub, backHash = "#/profile", stepLabels }) {
+  setActiveNav(null);
+  view.innerHTML = "";
+
+  const section = document.createElement("section");
+  section.className = "stack wizard";
+
+  const back = document.createElement("a");
+  back.className = "back";
+  back.href = backHash;
+  back.innerHTML = "&larr; Back to settings";
+  section.appendChild(back);
+
+  const head = document.createElement("div");
+  head.className = "wizard-head";
+  const h1 = document.createElement("h1");
+  h1.className = "h1";
+  h1.textContent = title;
+  head.appendChild(h1);
+  if (sub) {
+    const p = document.createElement("p");
+    p.className = "muted wizard-sub";
+    p.textContent = sub;
+    head.appendChild(p);
+  }
+  section.appendChild(head);
+
+  const stepper = document.createElement("ol");
+  stepper.className = "wizard-steps";
+  const dots = stepLabels.map((label, i) => {
+    const li = document.createElement("li");
+    li.className = "wizard-step";
+    const dot = document.createElement("span");
+    dot.className = "wizard-dot";
+    dot.textContent = String(i + 1);
+    const txt = document.createElement("span");
+    txt.className = "wizard-step-label";
+    txt.textContent = label;
+    li.appendChild(dot);
+    li.appendChild(txt);
+    stepper.appendChild(li);
+    return li;
+  });
+  section.appendChild(stepper);
+
+  const panel = document.createElement("div");
+  panel.className = "wizard-panel";
+  section.appendChild(panel);
+
+  view.appendChild(section);
+
+  function setStep(idx) {
+    dots.forEach((li, i) => {
+      li.classList.toggle("active", i === idx);
+      li.classList.toggle("done", i < idx);
+    });
+  }
+  setStep(0);
+
+  return { section, panel, setStep };
+}
+
+// Inline "send + verify 6-digit code" step used inside the local-mode guided
+// flows. Renders into `host`, mirrors openCodeModal's send/verify logic, and
+// calls onVerified() once the entered code matches.
+function mountInlineCodeStep({ host, email, purpose, heading, onVerified, onCancel }) {
+  let pending = null;
+  host.innerHTML = `
+    ${heading ? `<h2 class="wizard-h">${heading}</h2>` : ""}
+    <p class="muted" id="ics-intro">We'll email a 6-digit code to <strong>${email}</strong> to confirm it's you.</p>
+    <label class="field hidden" id="ics-field">
+      <span class="field-label">6-digit code</span>
+      <input id="ics-code" class="input email-link-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" />
+    </label>
+    <p class="auth-error hidden" id="ics-err"></p>
+    <div class="wizard-actions">
+      <button class="btn" type="button" id="ics-send">Send code</button>
+      <button class="btn hidden" type="button" id="ics-verify">Verify</button>
+      <button class="link-btn hidden" type="button" id="ics-resend">Resend code</button>
+      <button class="btn ghost" type="button" id="ics-cancel">Cancel</button>
+    </div>`;
+
+  const intro = host.querySelector("#ics-intro");
+  const field = host.querySelector("#ics-field");
+  const codeInp = host.querySelector("#ics-code");
+  const err = host.querySelector("#ics-err");
+  const sendBtn = host.querySelector("#ics-send");
+  const verifyBtn = host.querySelector("#ics-verify");
+  const resendBtn = host.querySelector("#ics-resend");
+  const cancelBtn = host.querySelector("#ics-cancel");
+
+  const showErr = m => { err.textContent = m; err.classList.remove("hidden"); };
+  const hideErr = () => err.classList.add("hidden");
+
+  async function send(initial) {
+    hideErr();
+    sendBtn.disabled = true; resendBtn.disabled = true;
+    (initial ? sendBtn : resendBtn).textContent = "Sending…";
+    try {
+      pending = await sendVerificationCode({ to: email, purpose });
+      intro.innerHTML = `We sent a 6-digit code to <strong>${email}</strong>. Enter it below.`;
+      field.classList.remove("hidden");
+      sendBtn.classList.add("hidden");
+      verifyBtn.classList.remove("hidden");
+      resendBtn.classList.remove("hidden");
+      resendBtn.textContent = "Resend code";
+      resendBtn.disabled = false;
+      codeInp.focus();
+    } catch (e) {
+      showErr(e.message || "Couldn't send verification code.");
+      sendBtn.disabled = false; sendBtn.textContent = "Send code";
+      resendBtn.disabled = false;
+    }
+  }
+
+  function verify() {
+    hideErr();
+    if (!pending) return showErr("Request a code first.");
+    if (Date.now() > pending.expiresAt) { pending = null; return showErr("That code expired. Tap \"Resend code\" for a new one."); }
+    const entered = codeInp.value.trim();
+    if (!/^\d{6}$/.test(entered)) return showErr("Enter the 6-digit code from the email.");
+    if (entered !== pending.code) return showErr("That code doesn't match. Double-check the email.");
+    onVerified();
+  }
+
+  sendBtn.addEventListener("click", () => send(true));
+  resendBtn.addEventListener("click", () => send(false));
+  verifyBtn.addEventListener("click", verify);
+  cancelBtn.addEventListener("click", () => onCancel ? onCancel() : (location.hash = "#/profile"));
+  codeInp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); verify(); } });
+
+  // Expose an error surface for the caller's post-verify failures.
+  return { showErr };
+}
+
+// ---- Render: Reset password (guided) ----
+function renderResetPassword() {
+  const acc = authStore.current();
+  if (!acc) { location.hash = "#/login"; return; }
+
+  // Google accounts have no CardKave password.
+  if (acc.provider !== "email") {
+    const w = buildWizard({
+      title: "Reset password",
+      sub: "Password sign-in isn't used on this account.",
+      stepLabels: ["Info"],
+    });
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Managed by Google</h2>
+      <p>Your account signs in with Google, so there's no CardKave password to reset. Manage your password through your Google account settings.</p>
+      <div class="wizard-actions"><a class="btn" href="#/profile">Back to settings</a></div>`;
+    return;
+  }
+
+  // Cloud mode: Firebase emails a secure reset link; the new password is
+  // chosen on Firebase's hosted page.
+  if (cloudSync.enabled) {
+    const w = buildWizard({
+      title: "Reset password",
+      sub: `We'll email a secure reset link to ${acc.email}.`,
+      stepLabels: ["Send link", "Check inbox"],
+    });
+    function stepSend() {
+      w.setStep(0);
+      w.panel.innerHTML = `
+        <h2 class="wizard-h">Send a reset link</h2>
+        <p class="muted">We'll send a password reset link to <strong>${acc.email}</strong>. Open it to choose a new password.</p>
+        <p class="auth-error hidden" id="rp-err"></p>
+        <div class="wizard-actions">
+          <button class="btn" type="button" id="rp-send">Send reset link</button>
+          <a class="btn ghost" href="#/profile">Cancel</a>
+        </div>`;
+      const btn = w.panel.querySelector("#rp-send");
+      const err = w.panel.querySelector("#rp-err");
+      btn.addEventListener("click", async () => {
+        err.classList.add("hidden");
+        btn.disabled = true; btn.textContent = "Sending…";
+        try {
+          await authStore.sendCloudPasswordReset();
+          stepDone();
+        } catch (e) {
+          err.textContent = e.message || "Couldn't send reset link.";
+          err.classList.remove("hidden");
+          btn.disabled = false; btn.textContent = "Send reset link";
+        }
+      });
+    }
+    function stepDone() {
+      w.setStep(1);
+      w.panel.innerHTML = `
+        <h2 class="wizard-h">Check your inbox</h2>
+        <p>We sent a reset link to <strong>${acc.email}</strong>. Open it to finish choosing a new password — the link expires after a while for security.</p>
+        <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
+    }
+    stepSend();
+    return;
+  }
+
+  // Local mode: verify identity via emailed code, then set a new password.
+  const w = buildWizard({
+    title: "Reset password",
+    sub: "Verify it's you, then choose a new password.",
+    stepLabels: ["Verify email", "New password", "Done"],
+  });
+
+  function stepVerify() {
+    w.setStep(0);
+    mountInlineCodeStep({
+      host: w.panel,
+      email: acc.email,
+      purpose: "password reset",
+      heading: "Verify your email",
+      onVerified: stepNewPassword,
+    });
+  }
+
+  function stepNewPassword() {
+    w.setStep(1);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Choose a new password</h2>
+      <label class="field">
+        <span class="field-label">New password</span>
+        <input id="rp-new" class="input" type="password" autocomplete="new-password" minlength="6" placeholder="At least 6 characters" />
+      </label>
+      <label class="field">
+        <span class="field-label">Confirm new password</span>
+        <input id="rp-confirm" class="input" type="password" autocomplete="new-password" minlength="6" />
+      </label>
+      <p class="auth-error hidden" id="rp-err"></p>
+      <div class="wizard-actions">
+        <button class="btn" type="button" id="rp-save">Save new password</button>
+        <a class="btn ghost" href="#/profile">Cancel</a>
+      </div>`;
+    const newInp = w.panel.querySelector("#rp-new");
+    const confirmInp = w.panel.querySelector("#rp-confirm");
+    const err = w.panel.querySelector("#rp-err");
+    const save = w.panel.querySelector("#rp-save");
+    const showErr = m => { err.textContent = m; err.classList.remove("hidden"); };
+    save.addEventListener("click", async () => {
+      err.classList.add("hidden");
+      if (newInp.value.length < 6) return showErr("Password must be at least 6 characters.");
+      if (newInp.value !== confirmInp.value) return showErr("Passwords don't match.");
+      save.disabled = true; save.textContent = "Saving…";
+      try {
+        await authStore.setPasswordViaReset(newInp.value);
+        stepDone();
+      } catch (e) {
+        showErr(e.message || "Couldn't reset password.");
+        save.disabled = false; save.textContent = "Save new password";
+      }
+    });
+    newInp.focus();
+  }
+
+  function stepDone() {
+    w.setStep(2);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Password reset</h2>
+      <p>Your password has been updated. You can use it the next time you sign in.</p>
+      <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
+  }
+
+  stepVerify();
+}
+
+// ---- Render: Change email (guided) ----
+function renderChangeEmail() {
+  const acc = authStore.current();
+  if (!acc) { location.hash = "#/login"; return; }
+
+  const cloud = cloudSync.enabled;
+  const w = buildWizard({
+    title: "Change email",
+    sub: "Update the email address you sign in with.",
+    stepLabels: cloud ? ["New email", "Verify"] : ["New email", "Verify email", "Done"],
+  });
+
+  function stepEnter() {
+    w.setStep(0);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Enter your new email</h2>
+      <p class="muted">Your current email is <strong>${acc.email}</strong>.</p>
+      <label class="field">
+        <span class="field-label">New email</span>
+        <input id="ce-email" class="input" type="email" autocomplete="email" placeholder="you@example.com" />
+      </label>
+      <p class="auth-error hidden" id="ce-err"></p>
+      <div class="wizard-actions">
+        <button class="btn" type="button" id="ce-next">Continue</button>
+        <a class="btn ghost" href="#/profile">Cancel</a>
+      </div>`;
+    const inp = w.panel.querySelector("#ce-email");
+    const err = w.panel.querySelector("#ce-err");
+    const next = w.panel.querySelector("#ce-next");
+    const showErr = m => { err.textContent = m; err.classList.remove("hidden"); };
+    next.addEventListener("click", async () => {
+      err.classList.add("hidden");
+      const val = inp.value.trim();
+      if (!isValidEmail(val)) return showErr("Enter a valid email address.");
+      if (val.toLowerCase() === acc.email) return showErr("That's already your email.");
+      if (cloud) {
+        next.disabled = true; next.textContent = "Sending…";
+        try {
+          await authStore.changeEmail(val);
+          stepCloudSent(val);
+        } catch (e) {
+          showErr(e.message || "Couldn't send verification email.");
+          next.disabled = false; next.textContent = "Continue";
+        }
+      } else {
+        if (authStore.findByEmail(val)) return showErr("Another account already uses that email.");
+        stepLocalVerify(val);
+      }
+    });
+    inp.focus();
+  }
+
+  function stepCloudSent(val) {
+    w.setStep(1);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Verify your new email</h2>
+      <p>We sent a verification link to <strong>${val}</strong>. Click it to switch your sign-in email. Until you do, keep using <strong>${acc.email}</strong>.</p>
+      <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
+  }
+
+  function stepLocalVerify(val) {
+    w.setStep(1);
+    const handle = mountInlineCodeStep({
+      host: w.panel,
+      email: val,
+      purpose: "email change",
+      heading: "Verify your new email",
+      onVerified: async () => {
+        try {
+          await authStore.changeEmail(val);
+          stepLocalDone(val);
+        } catch (e) {
+          handle.showErr(e.message || "Couldn't change email.");
+        }
+      },
+    });
+  }
+
+  function stepLocalDone(val) {
+    w.setStep(2);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Email updated</h2>
+      <p>Your sign-in email is now <strong>${val}</strong>.</p>
+      <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
+  }
+
+  stepEnter();
+}
+
+// ---- Render: Delete account (guided) ----
+function renderDeleteAccount() {
+  const acc = authStore.current();
+  if (!acc) { location.hash = "#/login"; return; }
+
+  const w = buildWizard({
+    title: "Delete account",
+    sub: "Permanently remove your CardKave login.",
+    stepLabels: ["Review", "Confirm"],
+  });
+
+  function stepReview() {
+    w.setStep(0);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Before you delete</h2>
+      <ul class="wizard-list">
+        <li>This removes your CardKave login (<strong>${acc.email}</strong>).</li>
+        <li>You'll be signed out immediately.</li>
+        <li>Card data saved in this browser stays on this device.</li>
+        <li>This can't be undone.</li>
+      </ul>
+      <div class="wizard-actions">
+        <button class="btn danger" type="button" id="da-next">Continue</button>
+        <a class="btn ghost" href="#/profile">Cancel</a>
+      </div>`;
+    w.panel.querySelector("#da-next").addEventListener("click", stepConfirm);
+  }
+
+  function stepConfirm() {
+    w.setStep(1);
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Confirm deletion</h2>
+      <p class="muted">Type <strong>DELETE</strong> below to confirm you want to permanently delete your account.</p>
+      <label class="field">
+        <span class="field-label">Confirmation</span>
+        <input id="da-confirm" class="input" autocomplete="off" placeholder="DELETE" />
+      </label>
+      <p class="auth-error hidden" id="da-err"></p>
+      <div class="wizard-actions">
+        <button class="btn danger" type="button" id="da-delete" disabled>Delete my account</button>
+        <a class="btn ghost" href="#/profile">Cancel</a>
+      </div>`;
+    const inp = w.panel.querySelector("#da-confirm");
+    const btn = w.panel.querySelector("#da-delete");
+    const err = w.panel.querySelector("#da-err");
+    inp.addEventListener("input", () => {
+      btn.disabled = inp.value.trim().toUpperCase() !== "DELETE";
+    });
+    btn.addEventListener("click", async () => {
+      err.classList.add("hidden");
+      btn.disabled = true; btn.textContent = "Deleting…";
+      try {
+        await authStore.deleteCurrent();
+        window.location.hash = "#/login";
+      } catch (e) {
+        // Firebase requires recent reauth for deletion — surface that clearly.
+        err.textContent = e.message || "Couldn't delete account.";
+        err.classList.remove("hidden");
+        btn.disabled = false; btn.textContent = "Delete my account";
+      }
+    });
+    inp.focus();
+  }
+
+  stepReview();
 }
 
 // ---- Render: Login
@@ -2959,6 +3305,7 @@ function renderFeed() {
   setActiveNav("feed");
   view.innerHTML = "";
   view.appendChild(tpl("tpl-feed"));
+  mountSubtabs("feed");
 
   const me = profileStore.get();
   const ctx = document.getElementById("feed-context");
@@ -3441,6 +3788,7 @@ function renderGroups() {
   setActiveNav("groups");
   view.innerHTML = "";
   view.appendChild(tpl("tpl-groups"));
+  mountSubtabs("groups");
 
   const me = profileStore.get();
   const ctx = document.getElementById("groups-context");
@@ -3746,6 +4094,7 @@ function renderEvents() {
   setActiveNav("events");
   view.innerHTML = "";
   view.appendChild(tpl("tpl-events"));
+  mountSubtabs("events");
 
   const me = profileStore.get();
   const ctx = document.getElementById("events-context");
@@ -5431,6 +5780,9 @@ function route() {
   if (a === "trades") return renderTrades();
   if (a === "decks" && b) return renderDeck(b);
   if (a === "decks") return renderDecks();
+  if (a === "reset-password") return renderResetPassword();
+  if (a === "change-email") return renderChangeEmail();
+  if (a === "delete-account") return renderDeleteAccount();
   if (a === "profile") return renderProfile();
   return renderBrowse();
 }
@@ -5450,8 +5802,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   refreshCounts();
   refreshAuthUI();
   paintLastUpdated();
-  const out = document.getElementById("nav-signout");
-  if (out) out.addEventListener("click", () => logout());
   route();
 });
 

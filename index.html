@@ -19,7 +19,7 @@
     }
   } catch (e) {}
 </script>
-<link rel="stylesheet" href="styles.css?v=36" />
+<link rel="stylesheet" href="styles.css?v=38" />
 </head>
 <body>
   <header class="topbar">
@@ -28,17 +28,13 @@
       <span class="brand-name">CardKave</span>
     </a>
     <nav class="nav" aria-label="Primary">
-      <a href="#/feed" data-route="feed">Feed</a>
-      <a href="#/groups" data-route="groups">Groups</a>
-      <a href="#/events" data-route="events">Events</a>
       <a href="#/browse" data-route="browse">Browse</a>
       <a href="#/collection" data-route="collection">Collection <span class="count" id="count-collection">0</span></a>
-      <a href="#/wishlist" data-route="wishlist">Wishlist <span class="count" id="count-wishlist">0</span></a>
-      <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
       <a href="#/decks" data-route="decks">Decks <span class="count" id="count-decks">0</span></a>
+      <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
+      <a href="#/feed" data-route="community">Community</a>
     </nav>
     <a class="nav-profile" id="nav-profile" href="#/login" data-route="login">Sign in</a>
-    <button id="nav-signout" class="nav-signout hidden" type="button" aria-label="Sign out" title="Sign out">Sign out</button>
   </header>
 
   <main id="view" class="view" aria-live="polite"></main>
@@ -189,11 +185,11 @@
 
       <p id="profile-flash" class="profile-flash hidden" role="status"></p>
 
-      <details class="profile-card" open>
-        <summary class="profile-card-summary">
+      <section class="profile-card">
+        <div class="profile-card-head">
           <span class="profile-card-title">Identity</span>
           <span class="profile-card-sub muted">Name, location, and bio</span>
-        </summary>
+        </div>
         <form id="profile-form" class="profile-form">
           <label class="field">
             <span class="field-label">Display name</span>
@@ -236,13 +232,13 @@
             <button class="btn" type="submit">Save profile</button>
           </div>
         </form>
-      </details>
+      </section>
 
-      <details class="profile-card">
-        <summary class="profile-card-summary">
+      <section class="profile-card">
+        <div class="profile-card-head">
           <span class="profile-card-title">Avatar</span>
           <span class="profile-card-sub muted">Color and initials</span>
-        </summary>
+        </div>
         <form id="avatar-form" class="profile-form">
           <label class="field">
             <span class="field-label">Avatar color</span>
@@ -257,13 +253,13 @@
             <button class="btn" type="submit">Save avatar</button>
           </div>
         </form>
-      </details>
+      </section>
 
-      <details class="profile-card">
-        <summary class="profile-card-summary">
+      <section class="profile-card">
+        <div class="profile-card-head">
           <span class="profile-card-title">Appearance</span>
           <span class="profile-card-sub muted">Light or dark theme</span>
-        </summary>
+        </div>
         <div class="profile-form">
           <label class="switch-row">
             <span class="switch-row-text">
@@ -276,65 +272,44 @@
             </span>
           </label>
         </div>
-      </details>
+      </section>
 
-      <details class="profile-card">
-        <summary class="profile-card-summary">
+      <section class="profile-card">
+        <div class="profile-card-head">
           <span class="profile-card-title">Email</span>
           <span class="profile-card-sub muted" id="pf-email-sub"></span>
-        </summary>
-        <form id="email-form" class="profile-form">
-          <label class="field">
-            <span class="field-label">Current email</span>
-            <input id="pf-email" class="input" type="email" disabled />
-          </label>
-          <label class="field">
-            <span class="field-label">New email</span>
-            <input id="pf-new-email" class="input" type="email" autocomplete="email" />
-          </label>
-          <p id="email-msg" class="auth-error hidden" role="alert"></p>
+        </div>
+        <div class="profile-form">
+          <p class="muted">Update the email address you sign in with. We'll walk you through verifying the new address.</p>
           <div class="actions">
-            <button class="btn" type="submit" id="email-submit">Send confirmation link</button>
+            <a class="btn" href="#/change-email">Change email</a>
           </div>
-        </form>
-      </details>
+        </div>
+      </section>
 
-      <details class="profile-card" id="password-card">
-        <summary class="profile-card-summary">
+      <section class="profile-card" id="password-card">
+        <div class="profile-card-head">
           <span class="profile-card-title">Password</span>
           <span class="profile-card-sub muted" id="pf-password-sub">Change your sign-in password</span>
-        </summary>
-        <form id="password-form" class="profile-form">
-          <label class="field">
-            <span class="field-label">Current password</span>
-            <input id="pf-current-pw" class="input" type="password" autocomplete="current-password" minlength="6" />
-          </label>
-          <label class="field">
-            <span class="field-label">New password</span>
-            <input id="pf-new-pw" class="input" type="password" autocomplete="new-password" minlength="6" />
-          </label>
-          <label class="field">
-            <span class="field-label">Confirm new password</span>
-            <input id="pf-confirm-pw" class="input" type="password" autocomplete="new-password" minlength="6" />
-          </label>
-          <p id="password-msg" class="auth-error hidden" role="alert"></p>
+        </div>
+        <div class="profile-form">
+          <p class="muted" id="pf-password-note">Reset your password with a quick, step-by-step guided flow.</p>
           <div class="actions">
-            <button class="btn" type="submit" id="password-submit">Update password</button>
-            <button class="btn ghost" type="button" id="password-reset-link">Email me a reset link</button>
+            <a class="btn" href="#/reset-password" id="reset-password-link">Reset password</a>
           </div>
-        </form>
-      </details>
+        </div>
+      </section>
 
-      <details class="profile-card profile-card-danger">
-        <summary class="profile-card-summary">
+      <section class="profile-card profile-card-danger">
+        <div class="profile-card-head">
           <span class="profile-card-title">Account</span>
           <span class="profile-card-sub muted">Sign out or delete</span>
-        </summary>
+        </div>
         <div class="profile-form profile-account-actions">
           <button class="btn ghost" type="button" id="profile-signout">Sign out</button>
-          <button class="btn danger" type="button" id="profile-delete">Delete account</button>
+          <a class="btn danger" href="#/delete-account">Delete account</a>
         </div>
-      </details>
+      </section>
     </section>
   </template>
 
@@ -850,6 +825,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" defer></script>
   <script src="firebase-config.js?v=1" defer></script>
   <script src="cloud-sync.js?v=3" defer></script>
-  <script src="app.js?v=55" defer></script>
+  <script src="app.js?v=57" defer></script>
 </body>
 </html>
