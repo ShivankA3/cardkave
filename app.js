@@ -4626,7 +4626,16 @@ function sharedGroupsBetween(meName, otherName) {
   });
 }
 
+// Two-sided swaps rank above one-directional leads (collectors who only have
+// what you want, or only want what you have).
+function tradeMatchKindRank(kind) {
+  return kind === "swap" ? 0 : 1;
+}
+
 function compareTradeMatches(a, b, me) {
+  // 0. Full two-way swaps first, then one-directional leads.
+  const ak = tradeMatchKindRank(a.kind), bk = tradeMatchKindRank(b.kind);
+  if (ak !== bk) return ak - bk;
   // 1. Same group as me beats no shared group.
   const aShared = sharedGroupsBetween(me.name, a.user.name).length;
   const bShared = sharedGroupsBetween(me.name, b.user.name).length;
@@ -4643,8 +4652,11 @@ function compareTradeMatches(a, b, me) {
 
 // Read all public trade profiles synced from cloud, intersect with the
 // current user's collection/wishlist, and return one match per other user
-// where there's a viable two-sided swap. Sorted with compareTradeMatches
-// (shared group → same location → biggest overlap).
+// with any overlap. Each match is tagged with a `kind`:
+//   "swap"   — viable two-sided trade (they have what you want AND want what you have)
+//   "supply" — they have cards on your wishlist (but don't want anything you have)
+//   "demand" — they want cards you already own (but have nothing you want)
+// Sorted with compareTradeMatches (swaps → shared group → same location → biggest overlap).
 function buildTradeMatches(me) {
   if (!me) return [];
 
@@ -4671,9 +4683,12 @@ function buildTradeMatches(me) {
     const theyHaveIWant = theirColl.filter(c => c && myWishIds.has(c.id));
     const iHaveTheyWant = myColl.filter(c => c && theirWishIds.has(c.id));
 
-    // A trade requires both directions to be satisfiable — otherwise the
-    // propose form can't render an option for one of the radio groups.
-    if (!theyHaveIWant.length || !iHaveTheyWant.length) continue;
+    // Surface any overlap: a full swap, collectors who *have* cards on your
+    // wishlist, or collectors who *want* cards you already own.
+    if (!theyHaveIWant.length && !iHaveTheyWant.length) continue;
+
+    const kind = theyHaveIWant.length && iHaveTheyWant.length ? "swap"
+      : theyHaveIWant.length ? "supply" : "demand";
 
     matches.push({
       user: {
@@ -4685,6 +4700,8 @@ function buildTradeMatches(me) {
       },
       theyHaveIWant,
       iHaveTheyWant,
+      theirCollection: theirColl,
+      kind,
     });
   }
 
@@ -4731,14 +4748,14 @@ function renderTrades() {
     return;
   }
 
-  ctx.textContent = `Matched by your collection and wishlist · prioritized for shared groups, then near ${me.location}.`;
+  ctx.textContent = `Matched by your collection and wishlist · search collectors who have what you want or want what you have.`;
 
   const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
   const myTrades = tradeStore.forUser(me.name, myUid);
   paintActiveTrades(myTrades, me);
 
   const matches = buildTradeMatches(me);
-  paintTradeMatches(matches, me);
+  setupTradeMatches(matches, me);
 
   if (!myTrades.length && !matches.length) {
     empty.classList.remove("hidden");
@@ -4830,23 +4847,97 @@ function makeRowThumb(card, kind) {
   return wrap;
 }
 
-function paintTradeMatches(matches, me) {
+// Filterable views over the match pool. `test` decides membership; note that
+// swaps qualify for every mode (a swap both has what you want and wants what
+// you have), so the counts overlap intentionally.
+const TRADE_MATCH_MODES = [
+  { id: "swaps",  label: "Swaps",                test: m => m.kind === "swap" },
+  { id: "supply", label: "Have what you want",   test: m => m.theyHaveIWant.length > 0 },
+  { id: "demand", label: "Want what you have",   test: m => m.iHaveTheyWant.length > 0 },
+];
+
+function tradeMatchMatchesQuery(m, q) {
+  if (m.user.name.toLowerCase().includes(q)) return true;
+  if ((m.user.location || "").toLowerCase().includes(q)) return true;
+  return m.theyHaveIWant.concat(m.iHaveTheyWant)
+    .some(c => (c.name || "").toLowerCase().includes(q));
+}
+
+// Wire up the filter tabs + search box once, then repaint the list on change.
+function setupTradeMatches(matches, me) {
   const sec = document.getElementById("matches-section");
-  const host = document.getElementById("matches-list");
-  const meta = document.getElementById("matches-meta");
-  host.innerHTML = "";
   if (!matches.length) {
     sec.classList.add("hidden");
     return;
   }
   sec.classList.remove("hidden");
+
+  const tabsHost = document.getElementById("matches-tabs");
+  const searchEl = document.getElementById("matches-search");
+  const state = { mode: "swaps", q: "" };
+
+  tabsHost.innerHTML = "";
+  TRADE_MATCH_MODES.forEach(mode => {
+    const count = matches.filter(mode.test).length;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab" + (mode.id === state.mode ? " active" : "");
+    btn.dataset.mode = mode.id;
+    btn.textContent = `${mode.label} (${count})`;
+    btn.addEventListener("click", () => {
+      state.mode = mode.id;
+      tabsHost.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.mode === mode.id));
+      paintTradeMatches(matches, me, state);
+    });
+    tabsHost.appendChild(btn);
+  });
+
+  // If there are no swaps to show, open on the first tab that has results so
+  // the default view isn't empty.
+  if (!matches.some(m => m.kind === "swap")) {
+    const first = TRADE_MATCH_MODES.find(mode => matches.some(mode.test));
+    if (first) {
+      state.mode = first.id;
+      tabsHost.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.mode === first.id));
+    }
+  }
+
+  searchEl.value = "";
+  searchEl.addEventListener("input", () => {
+    state.q = searchEl.value.trim().toLowerCase();
+    paintTradeMatches(matches, me, state);
+  });
+
+  paintTradeMatches(matches, me, state);
+}
+
+function paintTradeMatches(matches, me, state) {
+  const host = document.getElementById("matches-list");
+  const meta = document.getElementById("matches-meta");
+  const none = document.getElementById("matches-none");
+  host.innerHTML = "";
+
+  const mode = TRADE_MATCH_MODES.find(x => x.id === state.mode) || TRADE_MATCH_MODES[0];
+  let list = matches.filter(mode.test);
+  if (state.q) list = list.filter(m => tradeMatchMatchesQuery(m, state.q));
+
+  // Meta summarizes the whole pool, so the headline stays stable across tabs.
   const localCount = matches.filter(m => m.user.location.toLowerCase() === me.location.toLowerCase()).length;
   const groupCount = matches.filter(m => sharedGroupsBetween(me.name, m.user.name).length > 0).length;
-  const parts = [`${matches.length} collector${matches.length === 1 ? "" : "s"} ready to trade`];
+  const parts = [`${matches.length} collector${matches.length === 1 ? "" : "s"} with overlap`];
   if (groupCount) parts.push(`${groupCount} in your groups`);
   if (localCount) parts.push(`${localCount} near ${me.location}`);
   meta.textContent = parts.join(" · ") + ".";
-  matches.forEach(m => host.appendChild(makeMatchCard(m, me)));
+
+  if (!list.length) {
+    none.classList.remove("hidden");
+    none.textContent = state.q
+      ? "No collectors match your search in this view."
+      : "No collectors in this view yet.";
+    return;
+  }
+  none.classList.add("hidden");
+  list.forEach(m => host.appendChild(makeMatchCard(m, me)));
 }
 
 function makeMatchCard(match, me) {
@@ -4882,6 +4973,12 @@ function makeMatchCard(match, me) {
     b.textContent = "Nearby";
     nameRow.appendChild(b);
   }
+  const kindBadge = document.createElement("span");
+  kindBadge.className = `badge-kind badge-kind-${match.kind}`;
+  kindBadge.textContent = match.kind === "swap" ? "Two-way swap"
+    : match.kind === "supply" ? "Has your wishlist"
+    : "Wants your cards";
+  nameRow.appendChild(kindBadge);
   meta.appendChild(nameRow);
   const sub = document.createElement("div");
   sub.className = "muted mono";
@@ -4892,8 +4989,10 @@ function makeMatchCard(match, me) {
 
   const sides = document.createElement("div");
   sides.className = "match-sides";
-  sides.appendChild(makeMatchSide(`${match.user.name} has · you want`, match.theyHaveIWant));
-  sides.appendChild(makeMatchSide(`You have · ${match.user.name} wants`, match.iHaveTheyWant));
+  if (match.theyHaveIWant.length)
+    sides.appendChild(makeMatchSide(`${match.user.name} has · you want`, match.theyHaveIWant));
+  if (match.iHaveTheyWant.length)
+    sides.appendChild(makeMatchSide(`You have · ${match.user.name} wants`, match.iHaveTheyWant));
   wrap.appendChild(sides);
 
   const foot = document.createElement("div");
@@ -4963,21 +5062,37 @@ function renderProposeTrade(key) {
   const isLocal = match.user.location.toLowerCase() === me.location.toLowerCase();
   document.getElementById("propose-meta").textContent = `${match.user.location}${isLocal ? " · nearby" : ""}`;
 
-  document.getElementById("propose-mine-help").textContent = "From your collection — pick one card to offer.";
-  document.getElementById("propose-theirs-help").textContent = `From ${match.user.name}'s collection — pick one card to receive.`;
+  // For a full swap we already know which cards each side wants. For a
+  // one-directional lead, only one side is pre-matched — let the user pick
+  // freely from the relevant full collection to fill in the other side.
+  const mineOptions = match.iHaveTheyWant.length ? match.iHaveTheyWant : collectionCards.list();
+  const theirsOptions = match.theyHaveIWant.length ? match.theyHaveIWant : (match.theirCollection || []);
+
+  document.getElementById("propose-mine-help").textContent = match.iHaveTheyWant.length
+    ? `${match.user.name} wants these from your collection — pick one to offer.`
+    : "From your collection — pick one card to offer.";
+  document.getElementById("propose-theirs-help").textContent = match.theyHaveIWant.length
+    ? `On your wishlist and in ${match.user.name}'s collection — pick one to receive.`
+    : `From ${match.user.name}'s collection — pick one card to receive.`;
 
   const mineHost = document.getElementById("propose-mine");
   const theirsHost = document.getElementById("propose-theirs");
-  match.iHaveTheyWant.forEach((c, i) => mineHost.appendChild(makeTradeCardOption("propose-mine", c, i === 0)));
-  match.theyHaveIWant.forEach((c, i) => theirsHost.appendChild(makeTradeCardOption("propose-theirs", c, i === 0)));
+  if (!mineOptions.length || !theirsOptions.length) {
+    const missing = !mineOptions.length
+      ? "Add cards to your collection to have something to offer."
+      : `${match.user.name} has no cards listed to receive yet.`;
+    (!mineOptions.length ? mineHost : theirsHost).innerHTML = `<p class="muted">${missing}</p>`;
+  }
+  mineOptions.forEach((c, i) => mineHost.appendChild(makeTradeCardOption("propose-mine", c, i === 0)));
+  theirsOptions.forEach((c, i) => theirsHost.appendChild(makeTradeCardOption("propose-theirs", c, i === 0)));
 
   document.getElementById("propose-form").addEventListener("submit", e => {
     e.preventDefault();
     const mine = document.querySelector('input[name="propose-mine"]:checked');
     const theirs = document.querySelector('input[name="propose-theirs"]:checked');
     if (!mine || !theirs) return;
-    const fromCard = match.iHaveTheyWant.find(c => c.id === mine.value);
-    const toCard = match.theyHaveIWant.find(c => c.id === theirs.value);
+    const fromCard = mineOptions.find(c => c.id === mine.value);
+    const toCard = theirsOptions.find(c => c.id === theirs.value);
     const trade = {
       id: uid("t"),
       fromUserName: me.name,
