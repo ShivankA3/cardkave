@@ -1528,6 +1528,32 @@ a.group-chip:hover { border-color: color-mix(in srgb, var(--fg) 40%, var(--line)
   vertical-align: 1px;
 }
 
+.badge-kind {
+  display: inline-block;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  vertical-align: 1px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.badge-kind-swap {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--fg);
+}
+.badge-kind-supply { background: color-mix(in srgb, #2563eb 12%, transparent); border-color: color-mix(in srgb, #2563eb 40%, var(--line)); }
+.badge-kind-demand { background: color-mix(in srgb, #d97706 14%, transparent); border-color: color-mix(in srgb, #d97706 40%, var(--line)); }
+
+.matches-controls {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.matches-search { width: auto; flex: 1 1 220px; max-width: 320px; }
+#matches-tabs { flex-wrap: wrap; }
+
 .active-trades-list { display: flex; flex-direction: column; gap: 10px; }
 .trade-row {
   display: grid;
