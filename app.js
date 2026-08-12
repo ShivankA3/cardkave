@@ -4650,63 +4650,109 @@ function compareTradeMatches(a, b, me) {
          (a.theyHaveIWant.length + a.iHaveTheyWant.length);
 }
 
-// Read all public trade profiles synced from cloud, intersect with the
-// current user's collection/wishlist, and return one match per other user
-// with any overlap. Each match is tagged with a `kind`:
-//   "swap"   — viable two-sided trade (they have what you want AND want what you have)
-//   "supply" — they have cards on your wishlist (but don't want anything you have)
-//   "demand" — they want cards you already own (but have nothing you want)
-// Sorted with compareTradeMatches (swaps → shared group → same location → biggest overlap).
-function buildTradeMatches(me) {
-  if (!me) return [];
-
+// Every public trade profile synced from cloud except my own — the raw
+// collector directory, before any overlap is computed.
+function listTradeProfiles(me) {
   let profiles;
   try { profiles = JSON.parse(localStorage.getItem("trade-profiles")) || []; }
   catch { profiles = []; }
-  if (!Array.isArray(profiles) || !profiles.length) return [];
+  if (!Array.isArray(profiles)) return [];
 
   const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  return profiles.filter(p => {
+    if (!p || !p.name) return false;
+    if (myUid && p.uid && p.uid === myUid) return false;
+    if (!myUid && me && p.name === me.name) return false;
+    return true;
+  });
+}
+
+// Intersect one public profile with my collection/wishlist. `kind` is:
+//   "swap"   — viable two-sided trade (they have what you want AND want what you have)
+//   "supply" — they have cards on your wishlist (but don't want anything you have)
+//   "demand" — they want cards you already own (but have nothing you want)
+//   null     — no overlap at all; matches drop these, the directory keeps them
+function tradeProfileToEntry(p, myColl, myWishIds) {
+  const theirColl = Array.isArray(p.collection) ? p.collection : [];
+  const theirWish = Array.isArray(p.wishlist)   ? p.wishlist   : [];
+
+  const theirWishIds = new Set(theirWish.filter(c => c && c.id).map(c => c.id));
+  const theyHaveIWant = theirColl.filter(c => c && myWishIds.has(c.id));
+  const iHaveTheyWant = myColl.filter(c => c && theirWishIds.has(c.id));
+
+  const kind = theyHaveIWant.length && iHaveTheyWant.length ? "swap"
+    : theyHaveIWant.length ? "supply"
+    : iHaveTheyWant.length ? "demand" : null;
+
+  return {
+    user: {
+      uid: p.uid || null,
+      name: p.name,
+      location: p.location || "",
+      avatarColor: p.avatarColor || "",
+      initials: p.initials || "",
+    },
+    theyHaveIWant,
+    iHaveTheyWant,
+    theirCollection: theirColl,
+    theirWishlist: theirWish,
+    kind,
+  };
+}
+
+// One entry per other collector, overlap included. Unsorted — callers pick
+// the ordering that suits their view.
+function buildDirectoryEntries(me) {
+  if (!me) return [];
   const myColl = collectionCards.list();
   const myWishIds = new Set(wishlistCards.list().map(c => c.id));
+  return listTradeProfiles(me).map(p => tradeProfileToEntry(p, myColl, myWishIds));
+}
 
-  const matches = [];
-  for (const p of profiles) {
-    if (!p || !p.name) continue;
-    if (myUid && p.uid && p.uid === myUid) continue;
-    if (!myUid && p.name === me.name) continue;
-
-    const theirColl = Array.isArray(p.collection) ? p.collection : [];
-    const theirWish = Array.isArray(p.wishlist)   ? p.wishlist   : [];
-    if (!theirColl.length && !theirWish.length) continue;
-
-    const theirWishIds = new Set(theirWish.map(c => c.id));
-    const theyHaveIWant = theirColl.filter(c => c && myWishIds.has(c.id));
-    const iHaveTheyWant = myColl.filter(c => c && theirWishIds.has(c.id));
-
-    // Surface any overlap: a full swap, collectors who *have* cards on your
-    // wishlist, or collectors who *want* cards you already own.
-    if (!theyHaveIWant.length && !iHaveTheyWant.length) continue;
-
-    const kind = theyHaveIWant.length && iHaveTheyWant.length ? "swap"
-      : theyHaveIWant.length ? "supply" : "demand";
-
-    matches.push({
-      user: {
-        uid: p.uid || null,
-        name: p.name,
-        location: p.location || "",
-        avatarColor: p.avatarColor || "",
-        initials: p.initials || "",
-      },
-      theyHaveIWant,
-      iHaveTheyWant,
-      theirCollection: theirColl,
-      kind,
-    });
-  }
-
+// Collectors we can actually trade with right now, sorted with
+// compareTradeMatches (swaps → shared group → same location → biggest overlap).
+function buildTradeMatches(me) {
+  const matches = buildDirectoryEntries(me).filter(m => m.kind);
   matches.sort((a, b) => compareTradeMatches(a, b, me));
   return matches;
+}
+
+// Everything the directory search looks at for one collector, lowercased and
+// flattened once at build time so filtering stays cheap on every keystroke.
+function directorySearchText(entry) {
+  const names = new Set();
+  entry.theirCollection.concat(entry.theirWishlist).forEach(c => {
+    if (c && c.name) names.add(c.name);
+    if (c && c.set && c.set.name) names.add(c.set.name);
+  });
+  return [entry.user.name, entry.user.location, ...names].join("\n").toLowerCase();
+}
+
+// Collectors with overlap keep their match ranking and stay on top; the rest
+// fall back to shared group → nearby → alphabetical.
+function compareDirectoryEntries(a, b, me) {
+  if (!!a.kind !== !!b.kind) return a.kind ? -1 : 1;
+  const byMatch = compareTradeMatches(a, b, me);
+  if (byMatch) return byMatch;
+  return a.user.name.localeCompare(b.user.name);
+}
+
+// The full collector directory — everyone, including collectors with nothing
+// in common with me, each carrying a prebuilt search haystack.
+function buildCollectorDirectory(me) {
+  const entries = buildDirectoryEntries(me);
+  entries.forEach(e => { e.searchText = directorySearchText(e); });
+  entries.sort((a, b) => compareDirectoryEntries(a, b, me));
+  return entries;
+}
+
+// Find one collector by uid (preferred — survives renames) or display name,
+// across the whole directory rather than just the current matches.
+function findCollectorByKey(key, me) {
+  const directory = buildDirectoryEntries(me);
+  return directory.find(e => e.user.uid === key)
+      || directory.find(e => e.user.name === key)
+      || null;
 }
 
 function statusLabel(s) {
@@ -4748,7 +4794,7 @@ function renderTrades() {
     return;
   }
 
-  ctx.textContent = `Matched by your collection and wishlist · search collectors who have what you want or want what you have.`;
+  ctx.textContent = `Matched by your collection and wishlist · or search the full collector directory below.`;
 
   const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
   const myTrades = tradeStore.forUser(me.name, myUid);
@@ -4756,6 +4802,7 @@ function renderTrades() {
 
   const matches = buildTradeMatches(me);
   setupTradeMatches(matches, me);
+  setupCollectorDirectory(me);
 
   if (!myTrades.length && !matches.length) {
     empty.classList.remove("hidden");
@@ -5040,6 +5087,140 @@ function makeMatchSide(title, cards) {
   return wrap;
 }
 
+// ---- Render: Collector directory
+// The matches list only surfaces collectors you already overlap with. The
+// directory covers everyone, so you can look someone up by name, by city, or
+// by a card they hold even when there's nothing to trade yet.
+const DIRECTORY_PAGE = 24;
+
+function setupCollectorDirectory(me) {
+  const sec = document.getElementById("directory-section");
+  const directory = buildCollectorDirectory(me);
+  if (!directory.length) {
+    sec.classList.add("hidden");
+    return;
+  }
+  sec.classList.remove("hidden");
+
+  const searchEl = document.getElementById("directory-search");
+  const state = { q: "", limit: DIRECTORY_PAGE };
+
+  searchEl.value = "";
+  searchEl.addEventListener("input", () => {
+    state.q = searchEl.value.trim().toLowerCase();
+    state.limit = DIRECTORY_PAGE; // a new query starts from the top again
+    paintCollectorDirectory(directory, me, state);
+  });
+
+  paintCollectorDirectory(directory, me, state);
+}
+
+function paintCollectorDirectory(directory, me, state) {
+  const host = document.getElementById("directory-list");
+  const meta = document.getElementById("directory-meta");
+  const none = document.getElementById("directory-none");
+  const moreHost = document.getElementById("directory-more");
+  host.innerHTML = "";
+  moreHost.innerHTML = "";
+
+  const list = state.q ? directory.filter(e => e.searchText.includes(state.q)) : directory;
+  const total = directory.length;
+  meta.textContent = state.q
+    ? `${list.length} of ${total} collector${total === 1 ? "" : "s"} match "${state.q}".`
+    : `${total} collector${total === 1 ? "" : "s"} on CardKave · search by name, location, or any card they have or want.`;
+
+  if (!list.length) {
+    none.classList.remove("hidden");
+    none.textContent = "No collectors match that search.";
+    return;
+  }
+  none.classList.add("hidden");
+
+  const shown = list.slice(0, state.limit);
+  shown.forEach(e => host.appendChild(makeDirectoryCard(e, me)));
+
+  const hidden = list.length - shown.length;
+  if (!hidden) return;
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "btn ghost";
+  more.textContent = `Show ${Math.min(DIRECTORY_PAGE, hidden)} more (${hidden} not shown)`;
+  more.addEventListener("click", () => {
+    state.limit += DIRECTORY_PAGE;
+    paintCollectorDirectory(directory, me, state);
+  });
+  moreHost.appendChild(more);
+}
+
+function makeDirectoryCard(entry, me) {
+  const isLocal = !!entry.user.location &&
+    entry.user.location.toLowerCase() === (me.location || "").toLowerCase();
+  const shared = sharedGroupsBetween(me.name, entry.user.name);
+  const wrap = document.createElement("article");
+  wrap.className = `directory-card${isLocal ? " match-local" : ""}`;
+
+  const head = document.createElement("div");
+  head.className = "match-head";
+  const av = document.createElement("span");
+  av.className = "avatar";
+  paintAvatar(av, { name: entry.user.name, avatarColor: entry.user.avatarColor, initials: entry.user.initials });
+  head.appendChild(av);
+
+  const meta = document.createElement("div");
+  meta.className = "match-meta";
+  const nameRow = document.createElement("div");
+  nameRow.className = "match-name-row";
+  const nm = document.createElement("strong");
+  nm.textContent = entry.user.name;
+  nameRow.appendChild(nm);
+  shared.forEach(g => {
+    const chip = document.createElement("a");
+    chip.className = "group-chip";
+    chip.href = `#/groups/${g.id}`;
+    chip.textContent = `Group · ${g.name}`;
+    nameRow.appendChild(chip);
+  });
+  if (isLocal) {
+    const b = document.createElement("span");
+    b.className = "badge-local";
+    b.textContent = "Nearby";
+    nameRow.appendChild(b);
+  }
+  if (entry.kind) {
+    const kindBadge = document.createElement("span");
+    kindBadge.className = `badge-kind badge-kind-${entry.kind}`;
+    kindBadge.textContent = entry.kind === "swap" ? "Two-way swap"
+      : entry.kind === "supply" ? "Has your wishlist"
+      : "Wants your cards";
+    nameRow.appendChild(kindBadge);
+  }
+  meta.appendChild(nameRow);
+
+  const sub = document.createElement("div");
+  sub.className = "muted mono directory-sub";
+  const bits = [entry.user.location || "Location not shared"];
+  bits.push(`${entry.theirCollection.length} in collection`);
+  bits.push(`${entry.theirWishlist.length} wanted`);
+  if (entry.kind) {
+    const overlap = [];
+    if (entry.theyHaveIWant.length) overlap.push(`${entry.theyHaveIWant.length} you want`);
+    if (entry.iHaveTheyWant.length) overlap.push(`${entry.iHaveTheyWant.length} they want`);
+    bits.push(overlap.join(" · "));
+  }
+  sub.textContent = bits.join(" · ");
+  meta.appendChild(sub);
+  head.appendChild(meta);
+  wrap.appendChild(head);
+
+  const cta = document.createElement("a");
+  cta.className = "btn ghost directory-cta";
+  cta.href = `#/trades/new/${encodeURIComponent(entry.user.uid || entry.user.name)}`;
+  cta.textContent = "Propose trade";
+  wrap.appendChild(cta);
+
+  return wrap;
+}
+
 // ---- Render: Propose trade
 // `key` is either the other user's uid (preferred — survives renames) or
 // their display name (back-compat for older URLs).
@@ -5050,17 +5231,21 @@ function renderProposeTrade(key) {
   const me = profileStore.get();
   if (!me) { location.hash = "#/profile"; return; }
 
-  const matches = buildTradeMatches(me);
-  const match = matches.find(m => m.user.uid === key) || matches.find(m => m.user.name === key);
+  // Any collector in the directory can be proposed to — an overlap makes the
+  // card pickers smarter, but it isn't required.
+  const match = findCollectorByKey(key, me);
   if (!match) {
-    view.innerHTML = `<section class="stack"><a class="back" href="#/trades">&larr; All trades</a><p class="muted">No active match with ${key}. Add more cards to your collection or wishlist to discover trades.</p></section>`;
+    view.innerHTML = `<section class="stack"><a class="back" href="#/trades">&larr; All trades</a><p class="muted"></p></section>`;
+    view.querySelector("p").textContent = `We couldn't find a collector matching "${key}".`;
     return;
   }
 
   view.appendChild(tpl("tpl-propose-trade"));
   document.getElementById("propose-title").textContent = `Propose trade with ${match.user.name}`;
-  const isLocal = match.user.location.toLowerCase() === me.location.toLowerCase();
-  document.getElementById("propose-meta").textContent = `${match.user.location}${isLocal ? " · nearby" : ""}`;
+  const isLocal = !!match.user.location &&
+    match.user.location.toLowerCase() === (me.location || "").toLowerCase();
+  document.getElementById("propose-meta").textContent =
+    `${match.user.location || "Location not shared"}${isLocal ? " · nearby" : ""}`;
 
   // For a full swap we already know which cards each side wants. For a
   // one-directional lead, only one side is pre-matched — let the user pick
