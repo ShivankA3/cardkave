@@ -1553,6 +1553,7 @@ a.group-chip:hover { border-color: color-mix(in srgb, var(--fg) 40%, var(--line)
 }
 .matches-search { width: auto; flex: 1 1 220px; max-width: 320px; }
 #matches-tabs { flex-wrap: wrap; }
+.directory-search { width: auto; flex: 1 1 260px; max-width: 420px; }
 
 .active-trades-list { display: flex; flex-direction: column; gap: 10px; }
 .trade-row {
@@ -1653,6 +1654,36 @@ a.group-chip:hover { border-color: color-mix(in srgb, var(--fg) 40%, var(--line)
 
 .match-foot { display: flex; justify-content: flex-end; }
 .match-foot .btn { width: 100%; text-align: center; }
+
+/* ---- Collector directory ---- */
+.directory-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+  gap: 10px;
+}
+.directory-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.directory-card:hover {
+  border-color: color-mix(in srgb, var(--fg) 35%, var(--line));
+}
+.directory-card .match-name-row strong { font-size: 14px; }
+/* Wraps rather than truncating — the overlap counts sit at the end of the
+   line and are the most useful part of it. */
+.directory-sub { font-size: 11px; line-height: 1.5; }
+.directory-cta { padding: 6px 12px; font-size: 13px; white-space: nowrap; }
+.directory-more { display: flex; justify-content: center; }
+@media (max-width: 420px) {
+  .directory-card { grid-template-columns: minmax(0, 1fr); }
+  .directory-cta { text-align: center; }
+}
 
 /* ---- Propose / edit form ---- */
 .trade-form {
