@@ -87,6 +87,10 @@
   // through pushMyTradeProfile() after collection/wishlist/profile edits.
   const TRADE_PROFILE_COL = "tradeProfiles";
   const TRADE_PROFILE_KEY = "trade-profiles";
+  // uid whose cloud data this device last hydrated. Local-only items are merged
+  // into the cloud only on a device's first sign-in; after that the cloud wins,
+  // so something deleted on another device isn't resurrected by a stale cache.
+  const HYDRATED_KEY = "cloudsync-hydrated-uid";
 
   // ─── State ───────────────────────────────────────────────────────────
   let currentUid = null;
@@ -97,6 +101,28 @@
   // distinguish "echo of my own write" from "another client wrote this."
   const inFlightWrites = {};  // key → Set<docId>
   const subs = []; // unsubscribe fns from realtime listeners
+  // uid → { promise, resolve }, settled once that user's per-user data has
+  // been pulled into localStorage. Sign-in helpers wait on this so the app
+  // never routes to a half-signed-in page (nav still showing "Sign in", empty
+  // collection) while Firestore is still loading — very visible on Safari,
+  // where the popup handoff and first Firestore connection are slower.
+  const hydrations = new Map();
+  function hydrationFor(uid) {
+    let h = hydrations.get(uid);
+    if (!h) {
+      let resolve;
+      const promise = new Promise(r => { resolve = r; });
+      h = { promise, resolve };
+      hydrations.set(uid, h);
+    }
+    return h;
+  }
+  function whenHydrated(uid, timeoutMs = 15000) {
+    return Promise.race([
+      hydrationFor(uid).promise,
+      new Promise(r => setTimeout(r, timeoutMs)),
+    ]);
+  }
 
   function clearSubs() {
     while (subs.length) { try { subs.pop()(); } catch {} }
@@ -124,6 +150,7 @@
     signUpWithEmail,
     signInWithGoogle,
     updateProfile,
+    deleteUserData,
     signOut: () => auth.signOut(),
   };
 
@@ -143,6 +170,11 @@
       // re-hydrates cleanly.
       localStorage.removeItem(TRADE_PROFILE_KEY);
       if (tradeProfileTimer) { clearTimeout(tradeProfileTimer); tradeProfileTimer = null; }
+      hydrations.clear();
+      // Shared collections are re-downloaded on sign-in; don't leave the last
+      // session's copies (or have them pushed up as "local data" later).
+      Object.keys(SHARED).forEach(k => localStorage.removeItem(k));
+      localStorage.removeItem(HYDRATED_KEY);
       if (!firstAuthStateResolved) { firstAuthStateResolved = true; resolveReady(); }
       emit({ reason: "signout" });
       return;
@@ -156,10 +188,13 @@
       subscribeTradeProfiles();
       // Refresh our public trade profile from whatever local state we just hydrated.
       pushMyTradeProfile();
+      localStorage.setItem(HYDRATED_KEY, user.uid);
+      hydrationFor(user.uid).resolve();
       if (!firstAuthStateResolved) { firstAuthStateResolved = true; resolveReady(); }
       emit({ reason: "signin" });
     } catch (e) {
       console.error("[cloudSync] hydrate failed:", e);
+      hydrationFor(user.uid).resolve();
       if (!firstAuthStateResolved) { firstAuthStateResolved = true; resolveReady(); }
       emit({ reason: "signin-error", error: e });
     }
@@ -167,9 +202,15 @@
 
   // ─── Per-user hydration ──────────────────────────────────────────────
   async function hydratePerUser(user) {
-    for (const [key, schema] of Object.entries(PER_USER)) {
+    // Fetch every doc at once (one round trip instead of five), then apply
+    // them in schema order — keepOwnDecks reads the profile hydrated first.
+    const entries = Object.entries(PER_USER);
+    const firstSignInOnDevice = localStorage.getItem(HYDRATED_KEY) !== user.uid;
+    const snaps = await Promise.all(entries.map(([, schema]) => userRef(user.uid, schema.doc).get()));
+    for (let i = 0; i < entries.length; i++) {
+      const [key, schema] = entries[i];
       const ref = userRef(user.uid, schema.doc);
-      const snap = await ref.get();
+      const snap = snaps[i];
       const localRaw = localStorage.getItem(key);
       let local = localRaw == null ? null : safeParse(localRaw);
       // Drop any items that leaked in from a previously-shared collection and
@@ -183,7 +224,7 @@
         const cloudValue = schema.shape === "array" ? (data[schema.field] || []) : data;
         // For arrays (collection/wishlist), if local has unique items not in cloud
         // (offline edits), merge them. Otherwise prefer cloud.
-        if (schema.shape === "array" && Array.isArray(local) && local.length) {
+        if (firstSignInOnDevice && schema.shape === "array" && Array.isArray(local) && local.length) {
           const merged = mergeArrayById(cloudValue, local);
           localStorage.setItem(key, JSON.stringify(merged));
           if (merged.length !== cloudValue.length) {
@@ -233,7 +274,9 @@
         });
 
         // First snapshot + cloud is empty + we have local data → push local up.
-        if (firstSnapshot && snap.empty) {
+        // An empty snapshot served from the offline cache says nothing about
+        // the server — only seed from local data when the server confirms it.
+        if (firstSnapshot && snap.empty && !snap.metadata.fromCache) {
           const local = safeParse(localStorage.getItem(key)) || [];
           if (Array.isArray(local) && local.length) {
             sharedSnapshots[key] = new Map();
@@ -245,6 +288,9 @@
         firstSnapshot = false;
         sharedSnapshots[key] = newSnapshot;
         localStorage.setItem(key, JSON.stringify(items));
+        // The UI already shows our own writes; announcing their echo would
+        // make the app rebuild the page for nothing.
+        if (isOwnEcho(snap)) return;
         emit({ reason: "shared-update", key });
       }, err => console.warn(`[cloudSync] ${schema.col} listener error:`, err));
       subs.push(unsub);
@@ -286,9 +332,11 @@
     for (const item of items) {
       const docId = schema.primitive ? slugify(item) : (item && item.id ? String(item.id) : null);
       if (!docId) continue;
+      // Only stamp docs this client is creating — stamping existing docs that
+      // lack authorUid would record whoever saved next as their author.
       const docData = schema.primitive
         ? { value: item }
-        : stampOwnership({ ...item, id: docId });
+        : (prev.has(docId) ? { ...item, id: docId } : stampOwnership({ ...item, id: docId }));
       const serialized = JSON.stringify(schema.primitive ? { value: item } : docData);
       next.set(docId, serialized);
       if (prev.get(docId) !== serialized) writes.push({ docId, docData });
@@ -324,6 +372,7 @@
   // ─── Auth helpers (used by app.js renderLogin/renderSignup) ──────────
   async function signInWithEmail(email, password) {
     const cred = await auth.signInWithEmailAndPassword(email, password);
+    await whenHydrated(cred.user.uid);
     return cred.user;
   }
 
@@ -343,6 +392,7 @@
     };
     await db.collection("users").doc(cred.user.uid).set(profile, { merge: true });
     localStorage.setItem("user-profile", JSON.stringify(profile));
+    await whenHydrated(cred.user.uid);
     return cred.user;
   }
 
@@ -381,7 +431,31 @@
       await docRef.set(profile, { merge: true });
       localStorage.setItem("user-profile", JSON.stringify(profile));
     }
+    await whenHydrated(cred.user.uid);
     return { user: cred.user, isNew };
+  }
+
+  // Delete everything this user owns in Firestore. Called right before the
+  // Auth account is deleted, while the rules still recognise the owner.
+  async function deleteUserData() {
+    const uid = currentUid;
+    if (!uid) return;
+    // Stop listeners, queued trade-profile publishes and write-through so
+    // nothing re-creates the docs mid-delete.
+    clearSubs();
+    if (tradeProfileTimer) { clearTimeout(tradeProfileTimer); tradeProfileTimer = null; }
+    currentUid = null;
+    try {
+      const batch = db.batch();
+      batch.delete(db.collection(TRADE_PROFILE_COL).doc(uid));
+      for (const schema of Object.values(PER_USER)) batch.delete(userRef(uid, schema.doc));
+      await batch.commit();
+    } catch (e) {
+      currentUid = uid;
+      subscribeShared();
+      subscribeTradeProfiles();
+      throw e;
+    }
   }
 
   async function updateProfile(patch) {
@@ -407,6 +481,8 @@
       const items = [];
       snap.forEach(d => items.push({ ...d.data(), uid: d.id }));
       localStorage.setItem(TRADE_PROFILE_KEY, JSON.stringify(items));
+      // Every collection edit republishes our own profile — skip that echo.
+      if (isOwnEcho(snap)) return;
       emit({ reason: "shared-update", key: TRADE_PROFILE_KEY });
     }, err => console.warn("[cloudSync] tradeProfiles listener error:", err));
     subs.push(unsub);
@@ -447,6 +523,12 @@
   function userRef(uid, docName) {
     if (docName === "__profile__") return db.collection("users").doc(uid);
     return db.collection("users").doc(uid).collection("data").doc(docName);
+  }
+  // True when a snapshot only reflects this client's own not-yet-acknowledged
+  // writes (Firestore fires listeners immediately for local changes).
+  function isOwnEcho(snap) {
+    if (!snap.metadata.hasPendingWrites) return false;
+    return snap.docChanges().every(ch => ch.doc.metadata.hasPendingWrites || ch.type === "removed");
   }
   function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
   function slugify(s) {

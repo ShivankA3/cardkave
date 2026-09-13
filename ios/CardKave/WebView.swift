@@ -175,6 +175,46 @@ struct WebView: UIViewRepresentable {
             }
         }
 
+        // WKWebView silently ignores window.alert/confirm/prompt unless the UI
+        // delegate presents them — confirm() returns false and prompt() null —
+        // so "+ New list", rename, delete and sign-out would do nothing.
+        func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
+            presentPanel(alert, from: webView, orElse: completionHandler)
+        }
+
+        func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                     initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
+            presentPanel(alert, from: webView) { completionHandler(false) }
+        }
+
+        func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                     defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                     completionHandler: @escaping (String?) -> Void) {
+            let alert = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText }
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in
+                completionHandler(alert?.textFields?.first?.text)
+            })
+            presentPanel(alert, from: webView) { completionHandler(nil) }
+        }
+
+        /// Presents a JS panel on the top-most view controller. WebKit requires
+        /// the completion handler to run exactly once, so fall back if there's
+        /// nothing to present on.
+        private func presentPanel(_ alert: UIAlertController, from webView: WKWebView,
+                                  orElse fallback: @escaping () -> Void) {
+            guard var top = webView.window?.rootViewController else { fallback(); return }
+            while let presented = top.presentedViewController { top = presented }
+            top.present(alert, animated: true)
+        }
+
         // Outbound links opened in a new window (target="_blank") have no frame
         // to land in, so hand them to Safari instead of dead-ending.
         func webView(_ webView: WKWebView,

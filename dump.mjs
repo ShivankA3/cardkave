@@ -33,7 +33,8 @@ async function fileExists(p) {
   try { await access(p); return true; } catch { return false; }
 }
 
-async function fetchJSON(url, retries = 4) {
+// pokemontcg.io intermittently returns 500/502 under load, so retry generously.
+async function fetchJSON(url, retries = 8) {
   const headers = KEY ? { "X-Api-Key": KEY } : {};
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -46,7 +47,7 @@ async function fetchJSON(url, retries = 4) {
       const status = Number(String(err.message).match(/^(\d+)/)?.[1] || 0);
       if (status >= 400 && status < 500 && status !== 429) throw err;
       if (attempt === retries) break;
-      const wait = 500 * 2 ** attempt;
+      const wait = Math.min(500 * 2 ** attempt, 20000);
       process.stderr.write(`    retry ${attempt + 1}/${retries} in ${wait}ms (${err.message})\n`);
       await sleep(wait);
     }
@@ -100,7 +101,9 @@ async function dumpCardsForSet(set) {
   const file = join(OUT, "cards", `${set.id}.json`);
   if (!FORCE && (await fileExists(file))) {
     const cached = JSON.parse(await readFile(file, "utf8"));
-    return { cards: cached, fromCache: true };
+    // Recently released sets keep gaining cards (secret rares, promos), so
+    // only trust the cache once it has the full count.
+    if (cached.length >= (set.total || 0)) return { cards: cached, fromCache: true };
   }
   let all = [];
   let page = 1;

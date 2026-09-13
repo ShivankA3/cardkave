@@ -758,6 +758,11 @@ button { font: inherit; color: inherit; }
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 16px;
 }
+/* On phones two 160px columns don't fit beside the page padding, which left
+   one full-screen card per row. Keep two columns so results stay scannable. */
+@media (max-width: 480px) {
+  .tcg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+}
 .lazy-sentinel { height: 1px; width: 100%; pointer-events: none; }
 .tcg-card {
   position: relative;
@@ -2086,6 +2091,7 @@ body.auth-mode {
   transition: background 120ms ease, border-color 120ms ease;
 }
 .btn-provider:active { transform: translateY(1px); }
+.btn-provider:disabled { opacity: 0.6; cursor: progress; transform: none; }
 .btn-google {
   background: #fff;
   color: #1f1f1f;
