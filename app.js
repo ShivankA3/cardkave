@@ -2059,6 +2059,7 @@ const authStore = {
     if (cloudSync.enabled) {
       const user = window.fbAuth && window.fbAuth.currentUser;
       if (!user) return false;
+      let dataDeleted = false;
       try {
         // Firebase only deletes accounts signed in within the last ~5 minutes.
         // Check up front so we never wipe the data and then fail on the account.
@@ -2070,8 +2071,13 @@ const authStore = {
         // rules still recognise the owner — otherwise the deleted user lingers
         // in other collectors' trade matches forever.
         await cloudSync.deleteUserData();
+        dataDeleted = true;
         await user.delete();
       } catch (e) {
+        // The Auth delete failed after the data was removed (network drop, or
+        // Firebase still wanting a fresh login). The user is still signed in,
+        // so put their data back from this device and resume syncing.
+        if (dataDeleted) await cloudSync.restoreUserData().catch(err => console.warn("[auth] restore:", err));
         throw authError(e);
       }
       this.signOut();
@@ -2194,7 +2200,7 @@ function isValidEmail(s) {
 const postStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-posts")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("feed-posts", JSON.stringify(arr)); cloudPush("feed-posts", arr); },
-  add(p) { const arr = this.list(); arr.unshift(p); this.save(arr); },
+  add(p) { const arr = this.list(); arr.unshift(withCreatorUid(p)); this.save(arr); },
   byId(id) { return this.list().find(p => p.id === id); },
   update(id, patch) {
     const arr = this.list();
@@ -2226,7 +2232,7 @@ const postStore = {
 const groupStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-groups")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("feed-groups", JSON.stringify(arr)); cloudPush("feed-groups", arr); },
-  add(g) { const arr = this.list(); arr.unshift(g); this.save(arr); },
+  add(g) { const arr = this.list(); arr.unshift(withCreatorUid(g)); this.save(arr); },
   byId(id) { return this.list().find(g => g.id === id); },
   update(id, patch) {
     const arr = this.list();
@@ -2266,7 +2272,7 @@ const groupStore = {
 const eventStore = {
   list() { try { return JSON.parse(localStorage.getItem("feed-events")) || []; } catch { return []; } },
   save(arr) { localStorage.setItem("feed-events", JSON.stringify(arr)); cloudPush("feed-events", arr); },
-  add(e) { const arr = this.list(); arr.unshift(e); this.save(arr); },
+  add(e) { const arr = this.list(); arr.unshift(withCreatorUid(e)); this.save(arr); },
   byId(id) { return this.list().find(e => e.id === id); },
   update(id, patch) {
     const arr = this.list();
@@ -3379,7 +3385,12 @@ function renderCompleteSignup() {
   if (!acc) { location.hash = "#/login"; return; }
   // If the user already filled in a location somehow (e.g. they refreshed
   // after partly completing this page), don't force them through it again.
-  if (acc.location && acc.displayName) { location.hash = "#/browse"; return; }
+  // Trimmed to match needsProfileCompletion — a blank-space city would
+  // otherwise bounce between this page and Browse forever.
+  if (String(acc.location || "").trim() && acc.displayName) { location.hash = "#/browse"; return; }
+
+  // The router holds city-less accounts on this page, so offer a way out.
+  document.getElementById("complete-signout").addEventListener("click", () => logout({ confirm: false }));
 
   const emailEl = document.getElementById("complete-email");
   const nameInp = document.getElementById("complete-name");
@@ -4440,11 +4451,19 @@ function makeEventCard(e, me) {
 // Creator check. Prefers the Firebase uid (display names aren't unique and
 // can change); falls back to comparing `item[nameField]` with the profile
 // name only when either uid is missing (local mode, or not yet pushed).
+// Uses `creatorUid`, which is stamped only when an item is created. Older
+// items' `authorUid` can't be trusted — earlier sync code stamped it on
+// whoever first saved the doc (e.g. a liker) — so those fall back to name.
 function isCreator(item, me, nameField) {
   if (!me || !item) return false;
   const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
-  if (item.authorUid && myUid) return item.authorUid === myUid;
+  if (item.creatorUid && myUid) return item.creatorUid === myUid;
   return item[nameField] === me.name;
+}
+
+function withCreatorUid(item) {
+  const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  return myUid && !item.creatorUid ? { ...item, creatorUid: myUid } : item;
 }
 
 function canEditEvent(e, me) {
@@ -6484,7 +6503,7 @@ const ROUTE_SHARED_KEYS = {
   feed:   ["feed-posts", "feed-groups", "feed-events"],
   groups: ["feed-groups", "feed-posts", "feed-events"],
   events: ["feed-events", "feed-groups", "verified-event-templates"],
-  trades: ["trades", "trade-profiles"],
+  trades: ["trades", "trade-profiles", "feed-groups"], // groups drive match sort + "in your groups"
 };
 // Forms and multi-step flows are never rebuilt underneath the user.
 const NO_LIVE_REFRESH = new Set([
