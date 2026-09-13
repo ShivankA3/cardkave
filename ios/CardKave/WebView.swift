@@ -212,7 +212,11 @@ struct WebView: UIViewRepresentable {
                                   orElse fallback: @escaping () -> Void) {
             guard var top = webView.window?.rootViewController else { fallback(); return }
             while let presented = top.presentedViewController { top = presented }
+            // A controller mid-dismissal (e.g. the Google sign-in sheet closing)
+            // silently refuses to present, which would leave WebKit unanswered.
+            guard !top.isBeingDismissed else { fallback(); return }
             top.present(alert, animated: true)
+            if alert.presentingViewController == nil { fallback() }
         }
 
         // Outbound links opened in a new window (target="_blank") have no frame

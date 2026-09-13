@@ -444,7 +444,7 @@
           <span class="brand-name">CardKave</span>
         </div>
         <h1 class="auth-title">Finish your account</h1>
-        <p class="auth-sub">Signed in with Google as <strong id="complete-email"></strong>. Add a few details to get started.</p>
+        <p class="auth-sub">Signed in as <strong id="complete-email"></strong>. Add a few details to get started.</p>
 
         <form id="complete-signup-form" class="auth-form" novalidate>
           <label class="field">
@@ -458,6 +458,7 @@
           <p id="complete-error" class="auth-error hidden" role="alert"></p>
           <button class="btn auth-submit" type="submit" id="complete-submit">Continue</button>
         </form>
+        <p class="auth-sub">Wrong account? <button type="button" class="link-btn" id="complete-signout">Sign out</button></p>
       </div>
     </section>
   </template>
@@ -842,7 +843,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js" defer></script>
   <script src="firebase-config.js?v=1" defer></script>
-  <script src="cloud-sync.js?v=5" defer></script>
-  <script src="app.js?v=59" defer></script>
+  <script src="cloud-sync.js?v=6" defer></script>
+  <script src="app.js?v=60" defer></script>
 </body>
 </html>

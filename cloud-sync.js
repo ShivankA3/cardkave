@@ -91,6 +91,11 @@
   // into the cloud only on a device's first sign-in; after that the cloud wins,
   // so something deleted on another device isn't resurrected by a stale cache.
   const HYDRATED_KEY = "cloudsync-hydrated-uid";
+  // Per-user keys with a write Firestore hasn't acknowledged. There's no
+  // offline persistence, so a write made offline dies with the page; on the
+  // next launch this device's copy must win instead of being overwritten.
+  // Value is "<uid>:<token>" so only the writing user's changes are replayed.
+  const UNSENT_PREFIX = "cloudsync-unsent:";
 
   // ─── State ───────────────────────────────────────────────────────────
   let currentUid = null;
@@ -101,6 +106,8 @@
   // distinguish "echo of my own write" from "another client wrote this."
   const inFlightWrites = {};  // key → Set<docId>
   const subs = []; // unsubscribe fns from realtime listeners
+  // "collection/docId" paths this client deleted, until their echo arrives.
+  const ownDeletes = new Set();
   // uid → { promise, resolve }, settled once that user's per-user data has
   // been pulled into localStorage. Sign-in helpers wait on this so the app
   // never routes to a half-signed-in page (nav still showing "Sign in", empty
@@ -128,6 +135,7 @@
     while (subs.length) { try { subs.pop()(); } catch {} }
     Object.keys(sharedSnapshots).forEach(k => delete sharedSnapshots[k]);
     Object.keys(inFlightWrites).forEach(k => delete inFlightWrites[k]);
+    ownDeletes.clear();
   }
 
   function emit(detail) {
@@ -151,6 +159,7 @@
     signInWithGoogle,
     updateProfile,
     deleteUserData,
+    restoreUserData,
     signOut: () => auth.signOut(),
   };
 
@@ -164,7 +173,10 @@
       window.cloudSync.currentUid = null;
       // Clear any per-user keys from localStorage so signing in as a
       // different user on the same device doesn't leak stale data.
-      Object.keys(PER_USER).forEach(k => localStorage.removeItem(k));
+      Object.keys(PER_USER).forEach(k => {
+        localStorage.removeItem(k);
+        localStorage.removeItem(UNSENT_PREFIX + k);
+      });
       // Trade profiles is shared/public, but it includes other users'
       // data scoped to the prior session — clear it so a new sign-in
       // re-hydrates cleanly.
@@ -224,7 +236,13 @@
         const cloudValue = schema.shape === "array" ? (data[schema.field] || []) : data;
         // For arrays (collection/wishlist), if local has unique items not in cloud
         // (offline edits), merge them. Otherwise prefer cloud.
-        if (firstSignInOnDevice && schema.shape === "array" && Array.isArray(local) && local.length) {
+        const unsent = (localStorage.getItem(UNSENT_PREFIX + key) || "").startsWith(`${user.uid}:`);
+        if (unsent && local != null) {
+          // This device changed it but the write never reached the cloud
+          // (e.g. made offline, app closed) — keep and re-send local.
+          await ref.set(schema.shape === "array" ? { [schema.field]: local } : local, { merge: true });
+          localStorage.removeItem(UNSENT_PREFIX + key);
+        } else if (firstSignInOnDevice && schema.shape === "array" && Array.isArray(local) && local.length) {
           const merged = mergeArrayById(cloudValue, local);
           localStorage.setItem(key, JSON.stringify(merged));
           if (merged.length !== cloudValue.length) {
@@ -275,8 +293,10 @@
 
         // First snapshot + cloud is empty + we have local data → push local up.
         // An empty snapshot served from the offline cache says nothing about
-        // the server — only seed from local data when the server confirms it.
-        if (firstSnapshot && snap.empty && !snap.metadata.fromCache) {
+        // the server — wait for the server's answer rather than wiping local
+        // data or seeding from it.
+        if (firstSnapshot && snap.empty && snap.metadata.fromCache) return;
+        if (firstSnapshot && snap.empty) {
           const local = safeParse(localStorage.getItem(key)) || [];
           if (Array.isArray(local) && local.length) {
             sharedSnapshots[key] = new Map();
@@ -316,7 +336,13 @@
     const schema = PER_USER[key];
     const ref = userRef(currentUid, schema.doc);
     const data = schema.shape === "array" ? { [schema.field]: value || [] } : (value || {});
-    ref.set(data, { merge: true }).catch(err => {
+    const unsentKey = UNSENT_PREFIX + key;
+    const token = `${currentUid}:${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+    localStorage.setItem(unsentKey, token);
+    ref.set(data, { merge: true }).then(() => {
+      // Only clear if no newer write to this key is still in flight.
+      if (localStorage.getItem(unsentKey) === token) localStorage.removeItem(unsentKey);
+    }).catch(err => {
       console.warn(`[cloudSync] push ${key} failed:`, err);
     });
   }
@@ -347,6 +373,7 @@
 
     if (!writes.length && !deletes.length) return;
     sharedSnapshots[key] = next;
+    deletes.forEach(id => ownDeletes.add(`${schema.col}/${id}`));
 
     // Firestore batch limit is 500 ops. Split if needed.
     const ops = [...writes.map(w => ["set", w]), ...deletes.map(id => ["del", id])];
@@ -458,6 +485,23 @@
     }
   }
 
+  // Undo deleteUserData() when the Auth account delete then fails: re-publish
+  // this device's copy of the user's data and resume syncing.
+  async function restoreUserData() {
+    const user = auth.currentUser;
+    if (!user) return;
+    currentUid = user.uid;
+    await Promise.all(Object.entries(PER_USER).map(([key, schema]) => {
+      const value = safeParse(localStorage.getItem(key));
+      if (value == null) return null;
+      const data = schema.shape === "array" ? { [schema.field]: value } : value;
+      return userRef(user.uid, schema.doc).set(data, { merge: true });
+    }));
+    subscribeShared();
+    subscribeTradeProfiles();
+    pushMyTradeProfile();
+  }
+
   async function updateProfile(patch) {
     if (!currentUid) return null;
     const ref = db.collection("users").doc(currentUid);
@@ -528,7 +572,16 @@
   // writes (Firestore fires listeners immediately for local changes).
   function isOwnEcho(snap) {
     if (!snap.metadata.hasPendingWrites) return false;
-    return snap.docChanges().every(ch => ch.doc.metadata.hasPendingWrites || ch.type === "removed");
+    let own = true;
+    for (const ch of snap.docChanges()) {
+      // A removed doc carries no pending-write marker, so only count removals
+      // this client issued — another device's delete must still refresh.
+      const mine = ch.type === "removed"
+        ? ownDeletes.delete(ch.doc.ref.path)
+        : ch.doc.metadata.hasPendingWrites;
+      if (!mine) own = false;
+    }
+    return own;
   }
   function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
   function slugify(s) {

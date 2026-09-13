@@ -102,8 +102,11 @@ async function dumpCardsForSet(set) {
   if (!FORCE && (await fileExists(file))) {
     const cached = JSON.parse(await readFile(file, "utf8"));
     // Recently released sets keep gaining cards (secret rares, promos), so
-    // only trust the cache once it has the full count.
-    if (cached.length >= (set.total || 0)) return { cards: cached, fromCache: true };
+    // re-fetch them until the cache has the full count. Older sets whose API
+    // count never reaches `total` are trusted as-is instead of re-downloaded
+    // on every run.
+    const ageDays = (Date.now() - Date.parse((set.releaseDate || "").replace(/\//g, "-"))) / 86400000;
+    if (cached.length >= (set.total || 0) || !(ageDays < 180)) return { cards: cached, fromCache: true };
   }
   let all = [];
   let page = 1;
