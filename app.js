@@ -194,6 +194,7 @@ const collectionLists = {
     localStorage.setItem(this.KEY, JSON.stringify(arr));
     cloudPush(this.KEY, arr);
     refreshAggregateCollection();
+    refreshCounts(); // nav Collection badge
     try { window.dispatchEvent(new CustomEvent("collection-lists-changed")); } catch {}
     try { window.dispatchEvent(new CustomEvent("collection-changed")); } catch {}
   },
@@ -365,8 +366,18 @@ function migrateCollectionListsShape() {
     if (Array.isArray(l.cardIds)) l.cardIds.forEach(id => inAnyList.add(id));
     if (Array.isArray(l.cards)) l.cards.forEach(c => inAnyList.add(c.id));
   }
-  const orphans = globalCards.filter(c => c && c.id && !inAnyList.has(c.id));
-  if (!hasLegacyList && !orphans.length) return;
+  // Orphans (cards in the aggregate cache but in no list) only mean something
+  // for data from before lists existed. Once the lists key is present the
+  // cache is merely stale — e.g. a card removed on another device — and
+  // "rescuing" it would resurrect the deleted card.
+  const neverHadLists = localStorage.getItem("collection-lists") === null;
+  const orphans = neverHadLists ? globalCards.filter(c => c && c.id && !inAnyList.has(c.id)) : [];
+  if (!hasLegacyList && !orphans.length) {
+    if (!neverHadLists && JSON.stringify(collectionCards.list()) !== localStorage.getItem("collection-cards")) {
+      refreshAggregateCollection();
+    }
+    return;
+  }
 
   const byId = new Map(globalCards.map(c => [c.id, c]));
   const migrated = lists.map(l => {
@@ -415,11 +426,10 @@ function refreshCounts() {
       try {
         const trades = JSON.parse(localStorage.getItem("trades")) || [];
         const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
-        count = trades.filter(t => {
-          if (t.status !== "proposed") return false;
-          if (myUid && (t.fromUserUid === myUid || t.toUserUid === myUid)) return true;
-          return t.fromUserName === me.name || t.toUserName === me.name;
-        }).length;
+        // Compare uids when both exist; fall back to names only for a missing uid.
+        const isSide = (tName, tUid) => (myUid && tUid) ? tUid === myUid : tName === me.name;
+        count = trades.filter(t => t.status === "proposed" &&
+          (isSide(t.fromUserName, t.fromUserUid) || isSide(t.toUserName, t.toUserUid))).length;
       } catch {}
     }
     tradesEl.textContent = count;
@@ -554,6 +564,9 @@ function lazyRender(items, container, makeEl, opts = {}) {
   function checkVisible() {
     if (done) return;
     if (cursor >= list.length) return;
+    // A sentinel inside a hidden panel reports an all-zero rect, which would
+    // otherwise read as "in view" and render the entire list at once.
+    if (sentinel.offsetParent === null) return;
     const rect = sentinel.getBoundingClientRect();
     if (rect.top - margin <= window.innerHeight && rect.bottom + margin >= 0) {
       renderBatch();
@@ -597,14 +610,17 @@ async function fetchJSON(url, opts = {}) {
 // Local-data layer. The dump script (dump.mjs) writes static JSON under
 // ./data; the SPA never reloads index.html, so a single in-memory promise
 // per resource is all the cache we need. The browser HTTP cache handles
-// cross-session persistence.
+// cross-session persistence. A failed fetch is evicted so revisiting the page
+// retries instead of replaying the same error until a full reload.
 let _setsPromise = null;
 let _setsByIdPromise = null;
 const _cardsBySetIdPromise = new Map();
 let _cardsIndexPromise = null;
 
 function getSets() {
-  if (!_setsPromise) _setsPromise = fetchJSON(`${DATA}/sets.json`);
+  if (!_setsPromise) {
+    _setsPromise = fetchJSON(`${DATA}/sets.json`).catch(err => { _setsPromise = null; throw err; });
+  }
   return _setsPromise;
 }
 
@@ -614,20 +630,23 @@ function getSetsById() {
       const map = Object.create(null);
       for (const s of arr) map[s.id] = s;
       return map;
-    });
+    }).catch(err => { _setsByIdPromise = null; throw err; });
   }
   return _setsByIdPromise;
 }
 
 function getCardsForSet(setId) {
   if (!_cardsBySetIdPromise.has(setId)) {
-    _cardsBySetIdPromise.set(setId, fetchJSON(`${DATA}/cards/${setId}.json`));
+    _cardsBySetIdPromise.set(setId, fetchJSON(`${DATA}/cards/${setId}.json`)
+      .catch(err => { _cardsBySetIdPromise.delete(setId); throw err; }));
   }
   return _cardsBySetIdPromise.get(setId);
 }
 
 function getCardsIndex() {
-  if (!_cardsIndexPromise) _cardsIndexPromise = fetchJSON(`${DATA}/cards-index.json`);
+  if (!_cardsIndexPromise) {
+    _cardsIndexPromise = fetchJSON(`${DATA}/cards-index.json`).catch(err => { _cardsIndexPromise = null; throw err; });
+  }
   return _cardsIndexPromise;
 }
 
@@ -733,21 +752,36 @@ const recentQueries = {
 // case-insensitive prefix on any word ("char" → Charizard, Charcadet); multi-
 // token queries fall back to a substring match so phrases like "mr mime" hit.
 // Results are sorted newest-set-first to mirror the API's old orderBy.
+// Lowercase and strip accents/punctuation so "mr mime" matches "Mr. Mime",
+// "farfetchd" matches "Farfetch’d" and "Nidoran♀" matches "Nidoran ♀".
+function normalizeCardName(s) {
+  return String(s || "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/['’`]/g, "")
+    .replace(/[♀♂]/g, " $& ")
+    .replace(/[^a-z0-9♀♂]+/g, " ")
+    .trim();
+}
+
+// Cached on the index entry — ~20k names are scanned on every search.
+function entryNormName(e) {
+  if (e._nn === undefined) e._nn = normalizeCardName(e.n);
+  return e._nn;
+}
+
 function searchCardsByName(query, index, setsById) {
-  const cleaned = query.replace(/\s+/g, " ").trim().toLowerCase();
+  const cleaned = normalizeCardName(query);
   if (cleaned.length < 2) return [];
   const tokens = cleaned.split(" ");
 
   let matches;
   if (tokens.length === 1) {
     const t = tokens[0];
-    matches = index.filter(e => {
-      const n = e.n.toLowerCase();
-      if (n.startsWith(t)) return true;
-      return n.split(/\s+/).some(w => w.startsWith(t));
-    });
+    matches = index.filter(e => entryNormName(e).split(" ").some(w => w.startsWith(t)));
   } else {
-    matches = index.filter(e => e.n.toLowerCase().includes(cleaned));
+    matches = index.filter(e => entryNormName(e).includes(cleaned));
   }
 
   matches.sort((a, b) => {
@@ -817,20 +851,23 @@ async function renderBrowse() {
         loader.textContent = "Couldn't load sets. Check your connection and try again.";
       });
 
-    // Search only runs on Enter — auto-search-as-you-type feels noisy when
-    // there are this many sets. Clearing the input restores the default view
-    // immediately (empty isn't really a "search").
+    // Filter as the user types (debounced so fast typing doesn't rebuild the
+    // grid on every keystroke); Enter applies immediately.
+    let filterTimer = null;
     search.addEventListener("keydown", e => {
       if (e.key === "Enter") {
         e.preventDefault();
+        clearTimeout(filterTimer);
         render(search.value);
       }
     });
     search.addEventListener("input", () => {
-      if (search.value === "") render("");
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => render(search.value), 200);
     });
 
     cleanupSets = () => {
+      clearTimeout(filterTimer);
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
     };
   }
@@ -845,6 +882,7 @@ async function renderBrowse() {
     const clearBtn = document.getElementById("clear-recent");
 
     let searchToken = 0;
+    let typeTimer = null;
 
     const onCardOpen = (c) => openCardModal(c);
 
@@ -950,8 +988,11 @@ async function renderBrowse() {
 
     let cleanupLazy = null;
 
-    async function performSearch(q) {
+    // `remember` is false for as-you-type searches so half-typed queries
+    // don't flood the recents dropdown; Enter / picking a recent sets it.
+    async function performSearch(q, { remember = true } = {}) {
       const myToken = ++searchToken;
+      clearTimeout(typeTimer);
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
       grid.innerHTML = "";
 
@@ -967,7 +1008,7 @@ async function renderBrowse() {
 
       // Persist the query the user actually submitted (regardless of result
       // count) so it shows up in the recents dropdown next time.
-      recentQueries.add(trimmed);
+      if (remember) recentQueries.add(trimmed);
 
       setStatus("Searching…", true);
 
@@ -1002,12 +1043,13 @@ async function renderBrowse() {
       status.classList.toggle("hidden", !visible);
     }
 
-    // Search runs on Enter only (handled in the keydown listener above).
-    // Typing manages dropdown visibility; emptying the input resets the
-    // results to the prompt state immediately.
+    // Search as the user types once they pause; Enter searches immediately.
+    // Emptying the input resets the results to the prompt state right away.
     search.addEventListener("input", () => {
+      clearTimeout(typeTimer);
       if (search.value.trim()) {
         closeDropdown();
+        typeTimer = setTimeout(() => performSearch(search.value, { remember: false }), 350);
       } else {
         if (document.activeElement === search) openDropdown();
         performSearch("");
@@ -1015,6 +1057,7 @@ async function renderBrowse() {
     });
 
     cleanupCards = () => {
+      clearTimeout(typeTimer);
       searchToken++;
       if (cleanupLazy) { cleanupLazy(); cleanupLazy = null; }
       document.removeEventListener("mousedown", onDocMouseDown);
@@ -1088,7 +1131,7 @@ async function renderSet(setId) {
 
   // Kick off both requests in parallel — header paints as soon as the sets
   // index lands; cards appear when their per-set file arrives.
-  const setPromise = getSetsById().then(map => map[setId] || null);
+  const setPromise = getSetsById().then(map => map[setId] || null).catch(() => null);
   const cardsPromise = getCardsForSet(setId);
 
   let setData = null;
@@ -1100,12 +1143,19 @@ async function renderSet(setId) {
   try {
     cards = await cardsPromise;
   } catch {
-    status.textContent = "Couldn't load cards. Check your connection and try again.";
+    await setPromise;
+    // The user may have navigated away while this was loading.
+    if (!grid.isConnected) return;
+    if (!setData) titleEl.textContent = "Set not found";
+    status.textContent = setData
+      ? "Couldn't load cards. Check your connection and try again."
+      : "We couldn't find that set.";
     return;
   }
 
   // Make sure header data has settled before rendering meta line.
   await setPromise;
+  if (!grid.isConnected) return;
   if (!setData) {
     setData = { id: setId, name: setId, series: "", releaseDate: "" };
     paintHeader(setData);
@@ -1140,9 +1190,15 @@ async function renderDetail(id) {
   view.innerHTML = "";
   view.appendChild(tpl("tpl-detail"));
 
+  // Bail out of late writes if the user navigated away mid-fetch.
+  const art = document.getElementById("art");
   let p;
   try { p = await fetchJSON(`${API}/pokemon/${id}`); }
-  catch { view.innerHTML = "<p class='muted'>Couldn’t load that one.</p>"; return; }
+  catch {
+    if (art.isConnected) view.innerHTML = "<p class='muted'>Couldn’t load that one.</p>";
+    return;
+  }
+  if (!art.isConnected) return;
 
   document.getElementById("art").src = SPRITE(p.id);
   document.getElementById("art").alt = p.name;
@@ -1274,10 +1330,10 @@ async function getSpeciesName(p) {
 // then a fall-back to the longest distinctive token so "Mr. Mime" → Mr. Mime
 // cards and "Farfetch'd" still hits.
 function findCardsForName(displayName, index, setsById) {
-  const cleaned = displayName.replace(/\s+/g, " ").trim().toLowerCase();
+  const cleaned = normalizeCardName(displayName);
   if (!cleaned) return [];
 
-  const exact = index.filter(e => e.n.toLowerCase() === cleaned);
+  const exact = index.filter(e => entryNormName(e) === cleaned);
   if (exact.length) return enrichAndSort(exact, setsById);
 
   const tokens = cleaned.split(" ");
@@ -1285,7 +1341,7 @@ function findCardsForName(displayName, index, setsById) {
   if (distinctive && distinctive.length >= 3) {
     const t = distinctive;
     const tokenMatches = index.filter(e =>
-      e.n.toLowerCase().split(/\s+/).some(w => w === t || w.startsWith(t))
+      entryNormName(e).split(" ").some(w => w.startsWith(t))
     );
     if (tokenMatches.length) return enrichAndSort(tokenMatches, setsById);
   }
@@ -1305,6 +1361,7 @@ async function loadCards(pokemon) {
   if (!status || !grid) return;
 
   const speciesName = await getSpeciesName(pokemon);
+  if (!grid.isConnected) return;
   let cards;
   try {
     const [index, setsById] = await Promise.all([getCardsIndex(), getSetsById()]);
@@ -1313,6 +1370,7 @@ async function loadCards(pokemon) {
     status.textContent = "Couldn't load the card index. Try again later.";
     return;
   }
+  if (!grid.isConnected) return;
 
   if (!cards.length) {
     status.textContent = `No TCG cards found for ${speciesName}.`;
@@ -1446,22 +1504,25 @@ function renderCardList(store, route, title, emptyMsg, listSource) {
   mountSubtabs(route);
   document.getElementById("list-title").textContent = title;
 
-  const cards = store.list();
   const empty = document.getElementById("list-empty");
   const grid = document.getElementById("list-grid");
-
-  if (!cards.length) {
-    empty.textContent = emptyMsg;
-    empty.classList.remove("hidden");
-    return;
-  }
   empty.textContent = emptyMsg;
-  empty.classList.add("hidden");
-
   grid.classList.remove("grid");
   grid.classList.add("tcg-grid");
 
-  cards.forEach(c => grid.appendChild(makeTcgCardEl(c, { listSource })));
+  function paint() {
+    const cards = store.list();
+    grid.innerHTML = "";
+    empty.classList.toggle("hidden", cards.length > 0);
+    cards.forEach(c => grid.appendChild(makeTcgCardEl(c, { listSource })));
+  }
+  paint();
+
+  // Repaint on store changes (e.g. +/− in the card modal) so a card that was
+  // removed and re-added comes back without leaving the page.
+  const changeEvent = `${store.key}-changed`;
+  window.addEventListener(changeEvent, paint);
+  window.__cleanup = () => window.removeEventListener(changeEvent, paint);
 }
 
 // Which list is selected on the Collection page. "all" means the full
@@ -1485,11 +1546,11 @@ function renderCollection() {
 
   // Repaint on any data change so the active list stays in sync as cards
   // are added/removed elsewhere (modal stays open across page transitions).
+  // collectionLists.save fires both change events; listening to one avoids
+  // rebuilding the grid twice per +/−.
   const onChange = () => paintCollectionView();
-  window.addEventListener("collection-changed", onChange);
   window.addEventListener("collection-lists-changed", onChange);
   window.__cleanup = () => {
-    window.removeEventListener("collection-changed", onChange);
     window.removeEventListener("collection-lists-changed", onChange);
   };
 }
@@ -1867,13 +1928,16 @@ const authStore = {
       if (patch.initials     != null) cloudPatch.initials     = patch.initials;
       if (patch.email        != null) cloudPatch.email        = patch.email;
       if (patch.theme        != null) cloudPatch.theme        = patch.theme;
-      cloudSync.updateProfile(cloudPatch).then(() => {
-        const merged = { ...(profileStore.get() || {}), ...cloudPatch };
-        profileStore.set(merged);
-      }).catch(e => console.warn("[auth] updateCurrent:", e));
-      const merged = { ...(profileStore.get() || {}), ...cloudPatch };
-      profileStore.set(merged);
-      return { ...cur, ...patch };
+      // Apply locally right away so the UI reflects the change; the returned
+      // promise settles once Firestore accepts (or rejects) the write, so
+      // callers can report a failed save instead of a false "saved".
+      profileStore.set({ ...(profileStore.get() || {}), ...cloudPatch });
+      return cloudSync.updateProfile(cloudPatch)
+        .then(() => ({ ...cur, ...patch }))
+        .catch(e => {
+          console.warn("[auth] updateCurrent:", e);
+          throw new Error("Couldn't save your profile. Check your connection and try again.");
+        });
     }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return null;
@@ -1946,6 +2010,28 @@ const authStore = {
     }
   },
 
+  // Firebase requires a fresh sign-in before deleting an account or changing
+  // its email. Call from a click handler — the Google popup needs the gesture.
+  async reauthenticate({ password } = {}) {
+    const user = window.fbAuth && window.fbAuth.currentUser;
+    if (!user) throw new Error("You're not signed in.");
+    const isEmail = (user.providerData || []).some(p => p.providerId === "password");
+    try {
+      if (isEmail) {
+        const cred = firebase.auth.EmailAuthProvider.credential(user.email, password || "");
+        await user.reauthenticateWithCredential(cred);
+      } else if (window.__cardkaveHasNativeGoogle && window.__cardkaveNativeGoogleSignIn) {
+        const { idToken, accessToken } = await window.__cardkaveNativeGoogleSignIn();
+        const cred = firebase.auth.GoogleAuthProvider.credential(idToken, accessToken || null);
+        await user.reauthenticateWithCredential(cred);
+      } else {
+        await user.reauthenticateWithPopup(new firebase.auth.GoogleAuthProvider());
+      }
+    } catch (e) {
+      throw authError(e);
+    }
+  },
+
   async changeEmail(newEmail) {
     const acc = this.current();
     if (!acc) throw new Error("You're not signed in.");
@@ -1961,7 +2047,7 @@ const authStore = {
         await user.verifyBeforeUpdateEmail(e);
         return { pendingVerification: true };
       } catch (err) {
-        throw new Error(humanFirebaseError(err));
+        throw authError(err);
       }
     }
     if (this.findByEmail(e)) throw new Error("Another account already uses that email.");
@@ -1974,11 +2060,22 @@ const authStore = {
       const user = window.fbAuth && window.fbAuth.currentUser;
       if (!user) return false;
       try {
+        // Firebase only deletes accounts signed in within the last ~5 minutes.
+        // Check up front so we never wipe the data and then fail on the account.
+        const { authTime } = await user.getIdTokenResult();
+        if (Date.now() - Date.parse(authTime) > 4 * 60 * 1000) {
+          throw Object.assign(new Error("Recent sign-in required."), { code: "auth/requires-recent-login" });
+        }
+        // Remove the profile, per-user data and public trade profile while the
+        // rules still recognise the owner — otherwise the deleted user lingers
+        // in other collectors' trade matches forever.
+        await cloudSync.deleteUserData();
         await user.delete();
-        return true;
       } catch (e) {
-        throw new Error(humanFirebaseError(e));
+        throw authError(e);
       }
+      this.signOut();
+      return true;
     }
     const id = localStorage.getItem(this.SESSION_KEY);
     if (!id) return false;
@@ -1988,6 +2085,51 @@ const authStore = {
     return true;
   },
 };
+
+// A readable Error that keeps Firebase's code, so callers can branch on it
+// (e.g. show a "confirm it's you" step for auth/requires-recent-login).
+function authError(e) {
+  return Object.assign(new Error(humanFirebaseError(e)), { code: e && e.code });
+}
+
+// Shown when Firebase needs a fresh sign-in before a sensitive change. Email
+// accounts re-enter their password; Google accounts confirm in a popup.
+// `retry` re-runs the original action once the user is verified.
+function mountReauthStep({ host, retry }) {
+  const user = window.fbAuth && window.fbAuth.currentUser;
+  const isEmail = !!user && (user.providerData || []).some(p => p.providerId === "password");
+  host.innerHTML = `
+    <h2 class="wizard-h">Confirm it's you</h2>
+    <p class="muted">For your security, ${isEmail ? "re-enter your password" : "confirm with Google"} to continue.</p>
+    ${isEmail ? `<label class="field"><span class="field-label">Password</span><input id="ra-pw" class="input" type="password" autocomplete="current-password" /></label>` : ""}
+    <p class="auth-error hidden" id="ra-err"></p>
+    <div class="wizard-actions">
+      <button class="btn" type="button" id="ra-go">${isEmail ? "Confirm" : "Continue with Google"}</button>
+      <a class="btn ghost" href="#/profile">Cancel</a>
+    </div>`;
+  const pw = host.querySelector("#ra-pw");
+  const err = host.querySelector("#ra-err");
+  const go = host.querySelector("#ra-go");
+  const idleLabel = go.textContent;
+  async function submit() {
+    err.classList.add("hidden");
+    if (pw && !pw.value) { err.textContent = "Enter your password."; err.classList.remove("hidden"); return; }
+    go.disabled = true; go.textContent = "Confirming…";
+    try {
+      await authStore.reauthenticate({ password: pw ? pw.value : "" });
+      await retry();
+    } catch (e) {
+      err.textContent = e.message || "Couldn't confirm it's you.";
+      err.classList.remove("hidden");
+      go.disabled = false; go.textContent = idleLabel;
+    }
+  }
+  go.addEventListener("click", submit);
+  if (pw) {
+    pw.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+    pw.focus();
+  }
+}
 
 // Translate Firebase Auth error codes into the same human-readable messages
 // the existing UI already shows.
@@ -2004,6 +2146,10 @@ function humanFirebaseError(e) {
     case "auth/popup-blocked":          return "Your browser blocked the sign-in popup. Allow popups for this site and try again.";
     case "auth/network-request-failed": return "Couldn't reach Firebase. Check your connection and try again.";
     case "auth/operation-not-allowed":  return "This sign-in method isn't enabled in Firebase. See SETUP_FIREBASE.md.";
+    case "auth/requires-recent-login":  return "For your security, confirm it's you before making this change.";
+    case "auth/too-many-requests":      return "Too many attempts. Wait a minute and try again.";
+    case "auth/cancelled-popup-request": return "Sign-in is already open in another window.";
+    case "auth/user-mismatch":          return "That's a different account — confirm with the one you're signed in to.";
     default: return (e && e.message) || "Sign-in failed.";
   }
 }
@@ -2101,6 +2247,15 @@ const groupStore = {
     if (!joined) {
       // If they're leaving, also drop them from editors.
       g.editors = (g.editors || []).filter(n => n !== name);
+      // ...and from co-editor lists on the group's posts (one save).
+      const posts = postStore.list();
+      let postsChanged = false;
+      posts.forEach(p => {
+        if (p.groupId !== id || !(p.editors || []).includes(name)) return;
+        p.editors = p.editors.filter(n => n !== name);
+        postsChanged = true;
+      });
+      if (postsChanged) postStore.save(posts);
     }
     this.save(arr);
     return joined;
@@ -2129,15 +2284,24 @@ const eventStore = {
     const i = ev.attendees.indexOf(name);
     const joining = i < 0;
     if (joining) {
-      if (ev.attendees.length >= ev.maxPeople) return false;
+      const cap = eventCapacity(ev);
+      if (cap != null && ev.attendees.length >= cap) return false;
       ev.attendees.push(name);
     } else {
       ev.attendees.splice(i, 1);
+      // Cancelling an RSVP also drops them from editors (editor pool = attendees).
+      ev.editors = (ev.editors || []).filter(n => n !== name);
     }
     this.save(arr);
     return joining;
   },
 };
+
+// An event's attendee cap, or null when it has none (older/malformed items).
+function eventCapacity(e) {
+  const n = Number(e && e.maxPeople);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 // ---- Trade data layer
 function tradeCard(setId, num, name, set, rarity, hp = "", artist = "") {
@@ -2185,23 +2349,24 @@ const tradeStore = {
     this.save(arr);
     return arr[i];
   },
-  addMessage(id, sender, text) {
+  // Messages are always sent by the signed-in user, so stamp their uid too —
+  // chat "mine" styling then survives display-name collisions and renames.
+  addMessage(id, sender, text, senderUid = (window.cloudSync && window.cloudSync.currentUid) || null) {
     const arr = this.list();
     const i = arr.findIndex(t => t.id === id);
     if (i < 0) return null;
     arr[i].messages = arr[i].messages || [];
-    arr[i].messages.push({ sender, text, ts: Date.now() });
+    arr[i].messages.push({ sender, senderUid, text, ts: Date.now() });
     arr[i].updatedAt = Date.now();
     this.save(arr);
     return arr[i];
   },
   forUser(name, uid) {
     if (!name && !uid) return [];
-    return this.list().filter(t => {
-      if (uid && (t.fromUserUid === uid || t.toUserUid === uid)) return true;
-      if (name && (t.fromUserName === name || t.toUserName === name)) return true;
-      return false;
-    });
+    // When both uids exist they decide; names only fill in for a missing uid.
+    const isSide = (tName, tUid) => (uid && tUid) ? tUid === uid : (!!name && tName === name);
+    return this.list().filter(t =>
+      isSide(t.fromUserName, t.fromUserUid) || isSide(t.toUserName, t.toUserUid));
   },
 };
 
@@ -2247,6 +2412,8 @@ function readImageAsResizedDataUrl(file, maxDim = 800) {
 const uid = (prefix) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
 function relTime(ts) {
+  // Missing/invalid timestamps render as nothing rather than "NaNmo ago".
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "";
   const diff = Date.now() - ts;
   if (diff < 60000) return "just now";
   const m = Math.floor(diff / 60000);
@@ -2298,8 +2465,14 @@ function paintAvatar(el, profile) {
 function refreshProfileNav() {
   const el = document.getElementById("nav-profile");
   if (!el) return;
-  const p = profileStore.get();
   const authed = typeof authStore !== "undefined" && authStore.isAuthed();
+  // Right after sign-in the Firestore profile may still be loading; show the
+  // signed-in account rather than a "Sign in" link that just bounces back.
+  let p = profileStore.get();
+  if (!p && authed) {
+    const acc = authStore.current();
+    if (acc) p = { name: acc.displayName };
+  }
   if (p && authed) {
     el.textContent = "";
     el.setAttribute("href", "#/profile");
@@ -2365,19 +2538,24 @@ function renderProfile() {
   bioCount.textContent = bioInp.value.length;
   bioInp.addEventListener("input", () => { bioCount.textContent = bioInp.value.length; });
 
-  document.getElementById("profile-form").addEventListener("submit", e => {
+  document.getElementById("profile-form").addEventListener("submit", async e => {
     e.preventDefault();
     const name = nameInp.value.trim();
     const loc = locInp.value.trim();
     if (!name || !loc) return;
-    authStore.updateCurrent({
+    const saving = authStore.updateCurrent({
       displayName: name,
       location: loc,
       bio: bioInp.value.trim(),
       favoriteType: typeInp.value,
     });
     paintHeader();
-    showFlash("Profile saved.");
+    try {
+      await saving;
+      showFlash("Profile saved.");
+    } catch (err) {
+      showFlash(err.message, "error");
+    }
   });
 
   // ---- Avatar form
@@ -2413,14 +2591,19 @@ function renderProfile() {
   }
   renderColors();
 
-  document.getElementById("avatar-form").addEventListener("submit", e => {
+  document.getElementById("avatar-form").addEventListener("submit", async e => {
     e.preventDefault();
-    authStore.updateCurrent({
+    const saving = authStore.updateCurrent({
       avatarColor: selectedColor,
       initials: initialsInp.value.trim().slice(0, 4),
     });
     paintHeader();
-    showFlash("Avatar updated.");
+    try {
+      await saving;
+      showFlash("Avatar updated.");
+    } catch (err) {
+      showFlash(err.message, "error");
+    }
   });
 
   // ---- Appearance (theme toggle)
@@ -2429,7 +2612,8 @@ function renderProfile() {
   lightToggle.addEventListener("change", () => {
     const theme = lightToggle.checked ? "dark" : "light";
     themeStore.set(theme);
-    authStore.updateCurrent({ theme });
+    // The theme already applied on this device; syncing it is best-effort.
+    Promise.resolve(authStore.updateCurrent({ theme })).catch(() => {});
     showFlash(lightToggle.checked ? "Dark mode on." : "Light mode on.");
   });
 
@@ -2649,7 +2833,7 @@ function mountInlineCodeStep({ host, email, purpose, heading, onVerified, onCanc
   let pending = null;
   host.innerHTML = `
     ${heading ? `<h2 class="wizard-h">${heading}</h2>` : ""}
-    <p class="muted" id="ics-intro">We'll email a 6-digit code to <strong>${email}</strong> to confirm it's you.</p>
+    <p class="muted" id="ics-intro">We'll email a 6-digit code to <strong>${escapeHtml(email)}</strong> to confirm it's you.</p>
     <label class="field hidden" id="ics-field">
       <span class="field-label">6-digit code</span>
       <input id="ics-code" class="input email-link-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" />
@@ -2680,7 +2864,7 @@ function mountInlineCodeStep({ host, email, purpose, heading, onVerified, onCanc
     (initial ? sendBtn : resendBtn).textContent = "Sending…";
     try {
       pending = await sendVerificationCode({ to: email, purpose });
-      intro.innerHTML = `We sent a 6-digit code to <strong>${email}</strong>. Enter it below.`;
+      intro.innerHTML = `We sent a 6-digit code to <strong>${escapeHtml(email)}</strong>. Enter it below.`;
       field.classList.remove("hidden");
       sendBtn.classList.add("hidden");
       verifyBtn.classList.remove("hidden");
@@ -2746,7 +2930,7 @@ function renderResetPassword() {
       w.setStep(0);
       w.panel.innerHTML = `
         <h2 class="wizard-h">Send a reset link</h2>
-        <p class="muted">We'll send a password reset link to <strong>${acc.email}</strong>. Open it to choose a new password.</p>
+        <p class="muted">We'll send a password reset link to <strong>${escapeHtml(acc.email)}</strong>. Open it to choose a new password.</p>
         <p class="auth-error hidden" id="rp-err"></p>
         <div class="wizard-actions">
           <button class="btn" type="button" id="rp-send">Send reset link</button>
@@ -2771,7 +2955,7 @@ function renderResetPassword() {
       w.setStep(1);
       w.panel.innerHTML = `
         <h2 class="wizard-h">Check your inbox</h2>
-        <p>We sent a reset link to <strong>${acc.email}</strong>. Open it to finish choosing a new password — the link expires after a while for security.</p>
+        <p>We sent a reset link to <strong>${escapeHtml(acc.email)}</strong>. Open it to finish choosing a new password — the link expires after a while for security.</p>
         <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
     }
     stepSend();
@@ -2850,6 +3034,21 @@ function renderChangeEmail() {
   const acc = authStore.current();
   if (!acc) { location.hash = "#/login"; return; }
 
+  // Google accounts sign in with their Google address; changing it here would
+  // detach the account from the Google login.
+  if (acc.provider !== "email") {
+    const w = buildWizard({
+      title: "Change email",
+      sub: "Your sign-in email comes from Google.",
+      stepLabels: ["Info"],
+    });
+    w.panel.innerHTML = `
+      <h2 class="wizard-h">Managed by Google</h2>
+      <p>You sign in with Google as <strong>${escapeHtml(acc.email)}</strong>. To use a different address, sign in with that Google account instead.</p>
+      <div class="wizard-actions"><a class="btn" href="#/profile">Back to settings</a></div>`;
+    return;
+  }
+
   const cloud = cloudSync.enabled;
   const w = buildWizard({
     title: "Change email",
@@ -2861,7 +3060,7 @@ function renderChangeEmail() {
     w.setStep(0);
     w.panel.innerHTML = `
       <h2 class="wizard-h">Enter your new email</h2>
-      <p class="muted">Your current email is <strong>${acc.email}</strong>.</p>
+      <p class="muted">Your current email is <strong>${escapeHtml(acc.email)}</strong>.</p>
       <label class="field">
         <span class="field-label">New email</span>
         <input id="ce-email" class="input" type="email" autocomplete="email" placeholder="you@example.com" />
@@ -2886,6 +3085,13 @@ function renderChangeEmail() {
           await authStore.changeEmail(val);
           stepCloudSent(val);
         } catch (e) {
+          if (e.code === "auth/requires-recent-login") {
+            mountReauthStep({
+              host: w.panel,
+              retry: async () => { await authStore.changeEmail(val); stepCloudSent(val); },
+            });
+            return;
+          }
           showErr(e.message || "Couldn't send verification email.");
           next.disabled = false; next.textContent = "Continue";
         }
@@ -2901,7 +3107,7 @@ function renderChangeEmail() {
     w.setStep(1);
     w.panel.innerHTML = `
       <h2 class="wizard-h">Verify your new email</h2>
-      <p>We sent a verification link to <strong>${val}</strong>. Click it to switch your sign-in email. Until you do, keep using <strong>${acc.email}</strong>.</p>
+      <p>We sent a verification link to <strong>${escapeHtml(val)}</strong>. Click it to switch your sign-in email. Until you do, keep using <strong>${escapeHtml(acc.email)}</strong>.</p>
       <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
   }
 
@@ -2927,7 +3133,7 @@ function renderChangeEmail() {
     w.setStep(2);
     w.panel.innerHTML = `
       <h2 class="wizard-h">Email updated</h2>
-      <p>Your sign-in email is now <strong>${val}</strong>.</p>
+      <p>Your sign-in email is now <strong>${escapeHtml(val)}</strong>.</p>
       <div class="wizard-actions"><a class="btn" href="#/profile">Done</a></div>`;
   }
 
@@ -2952,7 +3158,10 @@ function renderDeleteAccount() {
       <ul class="wizard-list">
         <li>This removes your CardKave login (<strong>${acc.email}</strong>).</li>
         <li>You'll be signed out immediately.</li>
-        <li>Card data saved in this browser stays on this device.</li>
+        ${cloudSync.enabled
+          ? `<li>Your profile, collection, wishlist, lists, decks and trade profile are deleted.</li>
+             <li>Posts, groups, events and trades you took part in stay visible to others.</li>`
+          : `<li>Card data saved in this browser stays on this device.</li>`}
         <li>This can't be undone.</li>
       </ul>
       <div class="wizard-actions">
@@ -2985,11 +3194,18 @@ function renderDeleteAccount() {
     btn.addEventListener("click", async () => {
       err.classList.add("hidden");
       btn.disabled = true; btn.textContent = "Deleting…";
-      try {
+      const doDelete = async () => {
         await authStore.deleteCurrent();
         window.location.hash = "#/login";
+      };
+      try {
+        await doDelete();
       } catch (e) {
-        // Firebase requires recent reauth for deletion — surface that clearly.
+        // Firebase requires a recent sign-in for deletion — confirm, then retry.
+        if (e.code === "auth/requires-recent-login") {
+          mountReauthStep({ host: w.panel, retry: doDelete });
+          return;
+        }
         err.textContent = e.message || "Couldn't delete account.";
         err.classList.remove("hidden");
         btn.disabled = false; btn.textContent = "Delete my account";
@@ -3048,8 +3264,21 @@ function renderLogin() {
     }
   });
 
-  document.getElementById("login-google").addEventListener("click", async () => {
+  bindGoogleButton(document.getElementById("login-google"), { clearError, showError });
+}
+
+// Shared by the login + signup pages. Shows progress and ignores repeat
+// clicks while the Google popup is open and the account is loading, so a
+// slow sign-in (notably Safari) doesn't look like a dead button.
+function bindGoogleButton(btn, { clearError, showError }) {
+  const label = btn.querySelector("span");
+  const idleText = label ? label.textContent : "";
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
     clearError();
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    if (label) label.textContent = "Signing in…";
     try {
       let isNew = false;
       if (cloudSync.enabled) {
@@ -3064,7 +3293,13 @@ function renderLogin() {
       // Brand-new Google users still need to enter the rest of their profile
       // (display name + city/area) — mirror the email signup requirement.
       location.hash = isNew ? "#/complete-signup" : "#/browse";
-    } catch (err) { showError(err.message); }
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+      if (label) label.textContent = idleText;
+    }
   });
 }
 
@@ -3125,24 +3360,9 @@ function renderSignup() {
     }
   });
 
-  document.getElementById("signup-google").addEventListener("click", async () => {
-    clearError();
-    try {
-      // Don't pre-seed location from the signup form here — new Google users
-      // always go through the completion page, where they enter it fresh.
-      let isNew = false;
-      if (cloudSync.enabled) {
-        const res = await authStore.signInWithGoogle();
-        isNew = !!(res && res.isNew);
-      } else {
-        const profile = await runGoogleOAuth();
-        if (!profile) return;
-        const res = authStore.signInWithProvider({ provider: "google", ...profile });
-        isNew = !!(res && res.isNew);
-      }
-      location.hash = isNew ? "#/complete-signup" : "#/browse";
-    } catch (err) { showError(err.message); }
-  });
+  // Don't pre-seed location from the signup form here — new Google users
+  // always go through the completion page, where they enter it fresh.
+  bindGoogleButton(document.getElementById("signup-google"), { clearError, showError });
 }
 
 // ---- Render: Complete signup (Google new-user profile finish)
@@ -3190,7 +3410,7 @@ function renderCompleteSignup() {
     submitBtn.disabled = true;
     submitBtn.textContent = "Saving…";
     try {
-      authStore.updateCurrent({ displayName: name, location: loc });
+      await authStore.updateCurrent({ displayName: name, location: loc });
       location.hash = "#/browse";
     } catch (err) {
       showError(err.message || "Couldn't save profile.");
@@ -3351,7 +3571,7 @@ function makePostEl(post, me) {
   const av = document.createElement("span");
   av.className = "avatar";
   const myProfile = profileStore.get();
-  if (myProfile && post.authorName === myProfile.name) {
+  if (isCreator(post, myProfile, "authorName")) {
     paintAvatar(av, myProfile);
   } else {
     av.textContent = initials(post.authorName);
@@ -3389,7 +3609,7 @@ function makePostEl(post, me) {
 
   const sub = document.createElement("div");
   sub.className = "post-sub muted mono";
-  sub.textContent = `${post.authorLocation} · ${relTime(post.createdAt)}`;
+  sub.textContent = [post.authorLocation, relTime(post.createdAt)].filter(Boolean).join(" · ");
   meta.appendChild(sub);
   head.appendChild(meta);
   wrap.appendChild(head);
@@ -3437,7 +3657,7 @@ function makePostEl(post, me) {
     if (!me) return;
     postStore.toggleLike(post.id, me.name);
     const updated = postStore.byId(post.id);
-    wrap.replaceWith(makePostEl(updated, profileStore.get()));
+    if (updated) wrap.replaceWith(makePostEl(updated, profileStore.get()));
   });
   actions.appendChild(likeBtn);
 
@@ -3465,7 +3685,7 @@ function makePostEl(post, me) {
       if (editHost.firstChild) { editHost.innerHTML = ""; return; }
       mountEditPostForm(editHost, post, () => {
         const updated = postStore.byId(post.id);
-        wrap.replaceWith(makePostEl(updated, profileStore.get()));
+        if (updated) wrap.replaceWith(makePostEl(updated, profileStore.get()));
       });
     });
     actions.appendChild(editBtn);
@@ -3473,7 +3693,7 @@ function makePostEl(post, me) {
 
   // Co-editor management — only the post creator sees this, and only on
   // group posts (the editor pool = the group's members).
-  if (me && me.name === post.authorName && post.groupId) {
+  if (isCreator(post, me, "authorName") && post.groupId) {
     const group = groupStore.byId(post.groupId);
     if (group) {
       const editorsBtn = document.createElement("button");
@@ -3492,7 +3712,7 @@ function makePostEl(post, me) {
           onChange: next => {
             postStore.update(post.id, { editors: next });
             const updated = postStore.byId(post.id);
-            wrap.replaceWith(makePostEl(updated, profileStore.get()));
+            if (updated) wrap.replaceWith(makePostEl(updated, profileStore.get()));
           },
         });
       });
@@ -3527,7 +3747,7 @@ function makeRepliesSection(post, me, onChanged) {
   const section = document.createElement("div");
   section.className = "post-replies";
 
-  const replies = (post.replies || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+  const replies = (post.replies || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const ids = new Set(replies.map(r => r.id));
   const byParent = new Map();
   replies.forEach(r => {
@@ -3874,15 +4094,15 @@ function paintGroups() {
 
   let groups = groupStore.list();
   if (me) {
-    const local = me.location.toLowerCase();
+    const local = (me.location || "").toLowerCase();
     groups = groups.slice().sort((a, b) => {
-      const al = a.location.toLowerCase() === local ? 0 : 1;
-      const bl = b.location.toLowerCase() === local ? 0 : 1;
+      const al = (a.location || "").toLowerCase() === local ? 0 : 1;
+      const bl = (b.location || "").toLowerCase() === local ? 0 : 1;
       if (al !== bl) return al - bl;
-      const ag = a.location.toLowerCase() === "global" ? 0 : 1;
-      const bg = b.location.toLowerCase() === "global" ? 0 : 1;
+      const ag = (a.location || "").toLowerCase() === "global" ? 0 : 1;
+      const bg = (b.location || "").toLowerCase() === "global" ? 0 : 1;
       if (ag !== bg) return ag - bg;
-      return b.createdAt - a.createdAt;
+      return (b.createdAt || 0) - (a.createdAt || 0);
     });
   }
 
@@ -4043,7 +4263,7 @@ function renderGroup(id) {
     list.innerHTML = "";
     const events = eventStore.list()
       .filter(ev => ev.groupId === g.id)
-      .sort((a, b) => b.createdAt - a.createdAt);
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     if (!events.length) {
       empty.classList.remove("hidden");
       return;
@@ -4054,7 +4274,7 @@ function renderGroup(id) {
 
   function paintEditors() {
     editorsHost.innerHTML = "";
-    if (!me || me.name !== g.createdBy) return;
+    if (!isCreator(g, me, "createdBy")) return;
     renderEditorsPanel(editorsHost, {
       title: "Group co-editors",
       subtitle: "Grant other group members permission to edit this group.",
@@ -4131,15 +4351,15 @@ function paintEvents(tab) {
 
   let events = eventStore.list().filter(e => tab === "verified" ? e.verified : !e.verified);
   if (me) {
-    const local = me.location.toLowerCase();
+    const local = (me.location || "").toLowerCase();
     events = events.slice().sort((a, b) => {
-      const al = a.location.toLowerCase() === local ? 0 : 1;
-      const bl = b.location.toLowerCase() === local ? 0 : 1;
+      const al = (a.location || "").toLowerCase() === local ? 0 : 1;
+      const bl = (b.location || "").toLowerCase() === local ? 0 : 1;
       if (al !== bl) return al - bl;
-      const ag = a.location.toLowerCase() === "global" ? 0 : 1;
-      const bg = b.location.toLowerCase() === "global" ? 0 : 1;
+      const ag = (a.location || "").toLowerCase() === "global" ? 0 : 1;
+      const bg = (b.location || "").toLowerCase() === "global" ? 0 : 1;
       if (ag !== bg) return ag - bg;
-      return b.createdAt - a.createdAt;
+      return (b.createdAt || 0) - (a.createdAt || 0);
     });
   }
 
@@ -4187,7 +4407,8 @@ function makeEventCard(e, me) {
   const sub = document.createElement("div");
   sub.className = "event-sub muted mono";
   const count = (e.attendees || []).length;
-  sub.textContent = `${e.location} · ${count}/${e.maxPeople} attending`;
+  const cap = eventCapacity(e);
+  sub.textContent = `${e.location} · ${cap != null ? `${count}/${cap}` : count} attending`;
   body.appendChild(sub);
 
   const desc = document.createElement("p");
@@ -4216,21 +4437,31 @@ function makeEventCard(e, me) {
   return wrap;
 }
 
+// Creator check. Prefers the Firebase uid (display names aren't unique and
+// can change); falls back to comparing `item[nameField]` with the profile
+// name only when either uid is missing (local mode, or not yet pushed).
+function isCreator(item, me, nameField) {
+  if (!me || !item) return false;
+  const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
+  if (item.authorUid && myUid) return item.authorUid === myUid;
+  return item[nameField] === me.name;
+}
+
 function canEditEvent(e, me) {
   if (!me || !e) return false;
-  if (e.createdBy === me.name) return true;
+  if (isCreator(e, me, "createdBy")) return true;
   return (e.editors || []).includes(me.name);
 }
 
 function canEditGroup(g, me) {
   if (!me || !g) return false;
-  if (g.createdBy === me.name) return true;
+  if (isCreator(g, me, "createdBy")) return true;
   return (g.editors || []).includes(me.name);
 }
 
 function canEditPost(p, me) {
   if (!me || !p) return false;
-  if (p.authorName === me.name) return true;
+  if (isCreator(p, me, "authorName")) return true;
   return (p.editors || []).includes(me.name);
 }
 
@@ -4342,6 +4573,8 @@ function mountNewEventForm(host, me, opts) {
     titleInp.value = edit.title;
     locInp.value = edit.location;
     maxInp.value = edit.maxPeople;
+    // Can't shrink below the people already attending — native min validation.
+    maxInp.min = Math.max(2, (edit.attendees || []).length);
     descInp.value = edit.description;
     photoData = (edit.photos || []).slice();
     photoData.forEach(src => {
@@ -4375,28 +4608,52 @@ function mountNewEventForm(host, me, opts) {
       note.textContent = "New events need to be verified by a moderator before they go live. Reusing a previously verified title and location will publish instantly.";
     }
   }
+  // Changing an event's title or location re-derives `verified` on save.
+  function titleOrLocChanged() {
+    const sig = verifiedTemplateStore.signature;
+    return sig(titleInp.value, locInp.value) !== sig(edit.title || "", edit.location || "");
+  }
   if (!edit) {
     titleInp.addEventListener("input", refreshNote);
     locInp.addEventListener("input", refreshNote);
   } else {
+    // Only show the verification note once the edit would affect it.
+    const syncEditNote = () => {
+      note.classList.toggle("hidden", !titleOrLocChanged());
+      refreshNote();
+    };
     note.classList.add("hidden");
+    titleInp.addEventListener("input", syncEditNote);
+    locInp.addEventListener("input", syncEditNote);
   }
 
+  // Bumped on every pick so a slow read from an earlier pick can't mix into
+  // the newer selection. Submit stays disabled until the latest pick is read.
+  let photoGen = 0;
   photosInp.addEventListener("change", async () => {
+    const gen = ++photoGen;
     const files = Array.from(photosInp.files || []).slice(0, 3);
     preview.innerHTML = "";
     photoData = [];
-    for (const f of files) {
-      try {
-        const url = await readImageAsResizedDataUrl(f);
+    submitBtn.disabled = true;
+    try {
+      for (const f of files) {
+        let url = null;
+        try {
+          url = await readImageAsResizedDataUrl(f);
+        } catch {
+          // skip unreadable file
+        }
+        if (gen !== photoGen) return;
+        if (!url) continue;
         photoData.push(url);
         const img = document.createElement("img");
         img.src = url;
         img.alt = "";
         preview.appendChild(img);
-      } catch {
-        // skip unreadable file
       }
+    } finally {
+      if (gen === photoGen) submitBtn.disabled = false;
     }
   });
 
@@ -4404,6 +4661,7 @@ function mountNewEventForm(host, me, opts) {
 
   document.getElementById("new-event-form").addEventListener("submit", ev => {
     ev.preventDefault();
+    if (submitBtn.disabled) return; // photos still being read
     const title = titleInp.value.trim();
     const loc = locInp.value.trim();
     const max = Math.max(2, Math.min(500, Number(maxInp.value) || 0));
@@ -4411,14 +4669,18 @@ function mountNewEventForm(host, me, opts) {
     if (!title || !loc || !desc || !max) return;
 
     if (edit) {
+      // Re-read so RSVPs that landed while the form was open still count.
+      const current = eventStore.byId(edit.id) || edit;
+      const patch = {
+        title,
+        location: loc,
+        maxPeople: Math.max(max, (current.attendees || []).length),
+        description: desc,
+        photos: photoData.slice(),
+      };
+      if (titleOrLocChanged()) patch.verified = verifiedTemplateStore.has(title, loc);
       try {
-        eventStore.update(edit.id, {
-          title,
-          location: loc,
-          maxPeople: max,
-          description: desc,
-          photos: photoData.slice(),
-        });
+        eventStore.update(edit.id, patch);
       } catch (err) {
         alert("Couldn't save — your photos may be too large for browser storage. Try fewer or smaller images.");
         return;
@@ -4470,6 +4732,10 @@ function renderEvent(id) {
 
   function paint() {
     e = eventStore.byId(id);
+    if (!e) {
+      view.innerHTML = "<p class='muted'>Event not found.</p>";
+      return;
+    }
 
     const backLink = document.getElementById("event-back");
     if (e.groupId && groupStore.byId(e.groupId)) {
@@ -4482,8 +4748,11 @@ function renderEvent(id) {
 
     document.getElementById("event-title").textContent = e.title;
     const count = (e.attendees || []).length;
+    const cap = eventCapacity(e);
+    // Events have no scheduled date; this is when the listing was created.
+    const posted = relTime(e.createdAt);
     document.getElementById("event-meta").textContent =
-      `${e.location} · ${relTime(e.createdAt)}`;
+      posted ? `${e.location} · Posted ${posted}` : e.location;
     document.getElementById("event-desc").textContent = e.description;
 
     const tagsEl = document.getElementById("event-tags");
@@ -4524,9 +4793,10 @@ function renderEvent(id) {
 
     const fill = document.getElementById("event-attendance-fill");
     const label = document.getElementById("event-attendance-label");
-    const pct = Math.min(100, (count / e.maxPeople) * 100);
-    fill.style.width = `${pct}%`;
-    label.textContent = `${count} / ${e.maxPeople} attending`;
+    // No cap: hide the progress bar and just show the headcount.
+    fill.parentElement.classList.toggle("hidden", cap == null);
+    fill.style.width = cap != null ? `${Math.min(100, (count / cap) * 100)}%` : "0%";
+    label.textContent = cap != null ? `${count} / ${cap} attending` : `${count} attending`;
 
     const editBtn = document.getElementById("event-edit");
     const editHost = document.getElementById("event-edit-host");
@@ -4553,7 +4823,7 @@ function renderEvent(id) {
     } else {
       rsvpBtn.disabled = false;
       const isAttending = (e.attendees || []).includes(me.name);
-      const isFull = count >= e.maxPeople;
+      const isFull = cap != null && count >= cap;
       if (isAttending) {
         rsvpBtn.textContent = "Cancel RSVP";
         rsvpBtn.classList.add("ghost");
@@ -4599,7 +4869,7 @@ function renderEvent(id) {
   function paintEditors() {
     const host = document.getElementById("event-editors-host");
     host.innerHTML = "";
-    if (!me || me.name !== e.createdBy) return;
+    if (!isCreator(e, me, "createdBy")) return;
     renderEditorsPanel(host, {
       title: "Co-editors",
       subtitle: "Grant other RSVP'd attendees permission to edit this event.",
@@ -4642,8 +4912,8 @@ function compareTradeMatches(a, b, me) {
   if (aShared !== bShared) return bShared - aShared;
   // 2. Same location as me.
   const local = (me.location || "").toLowerCase();
-  const al = a.user.location.toLowerCase() === local ? 0 : 1;
-  const bl = b.user.location.toLowerCase() === local ? 0 : 1;
+  const al = local && a.user.location.toLowerCase() === local ? 0 : 1;
+  const bl = local && b.user.location.toLowerCase() === local ? 0 : 1;
   if (al !== bl) return al - bl;
   // 3. Larger total overlap (cards we mutually want) wins.
   return (b.theyHaveIWant.length + b.iHaveTheyWant.length) -
@@ -4673,8 +4943,10 @@ function listTradeProfiles(me) {
 //   "demand" — they want cards you already own (but have nothing you want)
 //   null     — no overlap at all; matches drop these, the directory keeps them
 function tradeProfileToEntry(p, myColl, myWishIds) {
-  const theirColl = Array.isArray(p.collection) ? p.collection : [];
-  const theirWish = Array.isArray(p.wishlist)   ? p.wishlist   : [];
+  // Public profiles are untrusted — drop malformed entries so pickers and
+  // snapshots never see a null card or one without an id.
+  const theirColl = Array.isArray(p.collection) ? p.collection.filter(c => c && c.id) : [];
+  const theirWish = Array.isArray(p.wishlist)   ? p.wishlist.filter(c => c && c.id)   : [];
 
   const theirWishIds = new Set(theirWish.filter(c => c && c.id).map(c => c.id));
   const theyHaveIWant = theirColl.filter(c => c && myWishIds.has(c.id));
@@ -4687,8 +4959,8 @@ function tradeProfileToEntry(p, myColl, myWishIds) {
   return {
     user: {
       uid: p.uid || null,
-      name: p.name,
-      location: p.location || "",
+      name: String(p.name),
+      location: typeof p.location === "string" ? p.location : "",
       avatarColor: p.avatarColor || "",
       initials: p.initials || "",
     },
@@ -4759,14 +5031,25 @@ function statusLabel(s) {
   return { proposed: "Proposed", accepted: "Accepted", declined: "Declined" }[s] || s;
 }
 
-// True when `me` is the user identified by (name, uid). Prefer uid because
-// it survives display-name changes; fall back to name for legacy trades
-// created before we stored uids.
+// True when `me` is the user identified by (name, uid). When both uids exist
+// they decide on their own (a shared display name must not grant access);
+// fall back to name only for legacy trades or local mode without a uid.
 function userIsParty(me, name, uid) {
   if (!me) return false;
   const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
-  if (myUid && uid && myUid === uid) return true;
+  if (myUid && uid) return myUid === uid;
   return !!name && name === me.name;
+}
+
+// True when it's `me`'s turn to accept/decline. Proposals and edits record
+// the party who must respond; legacy trades without that fall back to "the
+// recipient responds".
+function tradeAwaitsMe(trade, me) {
+  if (trade.awaitingUid || trade.awaitingName) {
+    return userIsParty(me, trade.awaitingName, trade.awaitingUid);
+  }
+  return userIsParty(me, trade.toUserName, trade.toUserUid) &&
+    !userIsParty(me, trade.fromUserName, trade.fromUserUid);
 }
 
 function tradeOtherParty(trade, me) {
@@ -4969,7 +5252,8 @@ function paintTradeMatches(matches, me, state) {
   if (state.q) list = list.filter(m => tradeMatchMatchesQuery(m, state.q));
 
   // Meta summarizes the whole pool, so the headline stays stable across tabs.
-  const localCount = matches.filter(m => m.user.location.toLowerCase() === me.location.toLowerCase()).length;
+  const myLocal = (me.location || "").toLowerCase();
+  const localCount = myLocal ? matches.filter(m => m.user.location.toLowerCase() === myLocal).length : 0;
   const groupCount = matches.filter(m => sharedGroupsBetween(me.name, m.user.name).length > 0).length;
   const parts = [`${matches.length} collector${matches.length === 1 ? "" : "s"} with overlap`];
   if (groupCount) parts.push(`${groupCount} in your groups`);
@@ -4988,7 +5272,7 @@ function paintTradeMatches(matches, me, state) {
 }
 
 function makeMatchCard(match, me) {
-  const isLocal = match.user.location.toLowerCase() === me.location.toLowerCase();
+  const isLocal = !!me.location && match.user.location.toLowerCase() === me.location.toLowerCase();
   const shared = sharedGroupsBetween(me.name, match.user.name);
   const wrap = document.createElement("article");
   wrap.className = `match-card${isLocal ? " match-local" : ""}${shared.length ? " match-shared-group" : ""}`;
@@ -5266,7 +5550,12 @@ function renderProposeTrade(key) {
     const missing = !mineOptions.length
       ? "Add cards to your collection to have something to offer."
       : `${match.user.name} has no cards listed to receive yet.`;
-    (!mineOptions.length ? mineHost : theirsHost).innerHTML = `<p class="muted">${missing}</p>`;
+    // textContent, not innerHTML — the collector's name comes from their
+    // public profile and is untrusted.
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = missing;
+    (!mineOptions.length ? mineHost : theirsHost).appendChild(note);
   }
   mineOptions.forEach((c, i) => mineHost.appendChild(makeTradeCardOption("propose-mine", c, i === 0)));
   theirsOptions.forEach((c, i) => theirsHost.appendChild(makeTradeCardOption("propose-theirs", c, i === 0)));
@@ -5278,20 +5567,26 @@ function renderProposeTrade(key) {
     if (!mine || !theirs) return;
     const fromCard = mineOptions.find(c => c.id === mine.value);
     const toCard = theirsOptions.find(c => c.id === theirs.value);
+    if (!fromCard || !toCard) return;
+    const myUid = (window.cloudSync && window.cloudSync.currentUid) || null;
     const trade = {
       id: uid("t"),
       fromUserName: me.name,
-      fromUserUid: (window.cloudSync && window.cloudSync.currentUid) || null,
-      fromUserLocation: me.location,
+      fromUserUid: myUid,
+      // Firestore rejects undefined, so a missing location is stored as "".
+      fromUserLocation: me.location || "",
       toUserName: match.user.name,
       toUserUid: match.user.uid || null,
-      toUserLocation: match.user.location,
+      toUserLocation: match.user.location || "",
       fromCard: snapshotCard(fromCard),
       toCard: snapshotCard(toCard),
       status: "proposed",
+      // The recipient responds to a fresh proposal.
+      awaitingUid: match.user.uid || null,
+      awaitingName: match.user.name,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: [{ sender: me.name, text: `Hi ${match.user.name} — interested in trading my ${fromCard.name} for your ${toCard.name}?`, ts: Date.now() }],
+      messages: [{ sender: me.name, senderUid: myUid, text: `Hi ${match.user.name} — interested in trading my ${fromCard.name} for your ${toCard.name}?`, ts: Date.now() }],
     };
     tradeStore.add(trade);
     location.hash = `#/trades/${trade.id}`;
@@ -5380,7 +5675,9 @@ function paintTradeDetail(id) {
     note.innerHTML = `<a href="#/profile" class="link">Sign in</a> to message or respond to this trade.`;
     actionsHost.appendChild(note);
   } else if (isParticipant && trade.status === "proposed") {
-    if (!isFromUser) {
+    // Only the party who didn't make the latest proposal/edit may accept, so
+    // nobody can accept terms they just set themselves.
+    if (tradeAwaitsMe(trade, me)) {
       actionsHost.appendChild(makeActionButton("Accept trade", "btn", () => {
         tradeStore.update(trade.id, { status: "accepted" });
         tradeStore.addMessage(trade.id, me.name, "Accepted — let's set up the swap.");
@@ -5502,7 +5799,7 @@ function paintTradeMessages(trade, me) {
     return;
   }
   msgs.forEach(m => {
-    const isMine = me && m.sender === me.name;
+    const isMine = userIsParty(me, m.sender, m.senderUid);
     const div = document.createElement("div");
     div.className = `message ${isMine ? "message-mine" : "message-theirs"}`;
     const head = document.createElement("div");
@@ -5552,11 +5849,16 @@ function mountEditTrade(host, trade, isFromUser, onSaved) {
     const newMine = myCards.find(c => c.id === mine.value);
     const newTheirs = theirCards.find(c => c.id === theirs.value);
     if (!newMine || !newTheirs) return;
+    // An edit is a counter-offer: it reopens the trade and hands the
+    // accept/decline decision to the other party.
     const patch = isFromUser
-      ? { fromCard: snapshotCard(newMine), toCard: snapshotCard(newTheirs), status: "proposed" }
-      : { fromCard: snapshotCard(newTheirs), toCard: snapshotCard(newMine), status: "proposed" };
+      ? { fromCard: snapshotCard(newMine), toCard: snapshotCard(newTheirs), status: "proposed",
+          awaitingUid: trade.toUserUid || null, awaitingName: trade.toUserName || "" }
+      : { fromCard: snapshotCard(newTheirs), toCard: snapshotCard(newMine), status: "proposed",
+          awaitingUid: trade.fromUserUid || null, awaitingName: trade.fromUserName || "" };
     tradeStore.update(trade.id, patch);
     const me = profileStore.get();
+    if (!me) return;
     tradeStore.addMessage(trade.id, me.name, `Updated the trade — now offering ${newMine.name} for ${newTheirs.name}.`);
     onSaved && onSaved();
   });
@@ -5600,13 +5902,38 @@ function totalCardCount(deck) {
   return (deck.cards || []).reduce((s, c) => s + (c.quantity || 0), 0);
 }
 
+const DECK_SIZE = 60;
+
+// Basic Energy is exempt from the copy limit. Special energies ("Double
+// Colorless Energy") are not.
+const BASIC_ENERGY_RE = /^(basic\s+)?(grass|fire|water|lightning|psychic|fighting|darkness|metal|fairy)\s+energy$/i;
+function isBasicEnergyName(name) {
+  return BASIC_ENERGY_RE.test(String(name || "").trim());
+}
+
+function deckCardName(c) {
+  return String(c.snapshot?.name || c.cardId || "").trim().toLowerCase();
+}
+
+// The copy limit applies per card name, across every printing in the deck.
+// Returns how many more copies of `name` may be added (Infinity for Basic Energy).
+function deckCopiesLeft(deck, name) {
+  if (isBasicEnergyName(name)) return Infinity;
+  const key = String(name || "").trim().toLowerCase();
+  const used = (deck.cards || [])
+    .filter(c => deckCardName(c) === key)
+    .reduce((s, c) => s + (c.quantity || 0), 0);
+  return Math.max(0, DECK_MAX_QTY - used);
+}
+
 function addCardToDeck(deckId, card) {
   const deck = deckStore.byId(deckId);
   if (!deck) return;
+  if (deckCopiesLeft(deck, card.name || card.id) <= 0) return;
   const cards = (deck.cards || []).slice();
   const i = cards.findIndex(c => c.cardId === card.id);
   if (i >= 0) {
-    cards[i] = { ...cards[i], quantity: Math.min(DECK_MAX_QTY, cards[i].quantity + 1) };
+    cards[i] = { ...cards[i], quantity: (cards[i].quantity || 0) + 1 };
   } else {
     cards.push({ cardId: card.id, quantity: 1, snapshot: snapshotCard(card) });
   }
@@ -5622,7 +5949,9 @@ function updateDeckCardQuantity(deckId, cardId, quantity) {
   if (quantity <= 0) {
     cards.splice(i, 1);
   } else {
-    cards[i] = { ...cards[i], quantity: Math.min(DECK_MAX_QTY, quantity) };
+    // This row may grow into whatever the name-wide limit leaves free.
+    const max = (cards[i].quantity || 0) + deckCopiesLeft(deck, cards[i].snapshot?.name || cardId);
+    cards[i] = { ...cards[i], quantity: Math.min(max, quantity) };
   }
   deckStore.update(deckId, { cards });
 }
@@ -5760,7 +6089,7 @@ function renderDecks() {
         id: uid("d"),
         ownerUid: (window.cloudSync && window.cloudSync.currentUid) || null,
         ownerName: me.name,
-        ownerLocation: me.location,
+        ownerLocation: me.location || "", // Firestore rejects undefined
         name, description: desc,
         cards: [],
         createdAt: Date.now(),
@@ -5795,7 +6124,7 @@ function makeDeckCard(d) {
   const sub = document.createElement("div");
   sub.className = "deck-sub muted mono";
   const total = totalCardCount(d);
-  sub.textContent = `${total} card${total === 1 ? "" : "s"} · updated ${relTime(d.updatedAt)}`;
+  sub.textContent = `${total} / ${DECK_SIZE} cards · updated ${relTime(d.updatedAt)}`;
   wrap.appendChild(sub);
 
   if (d.description) {
@@ -5862,7 +6191,12 @@ function paintDeckDetail(id) {
     descEl.classList.add("hidden");
   }
 
-  document.getElementById("deck-count").textContent = `${total} card${total === 1 ? "" : "s"}`;
+  // Informational only — a deck in progress can be saved at any size.
+  const countEl = document.getElementById("deck-count");
+  countEl.textContent = `${total} / ${DECK_SIZE} cards`;
+  countEl.title = total === DECK_SIZE ? "Tournament-legal deck size"
+    : total < DECK_SIZE ? `${DECK_SIZE - total} more to a ${DECK_SIZE}-card deck`
+    : `${total - DECK_SIZE} over the ${DECK_SIZE}-card limit`;
 
   const downloadBtn = document.getElementById("deck-download");
   downloadBtn.onclick = () => downloadDeckPDF(deck);
@@ -5967,9 +6301,10 @@ function makeDeckCardRow(deck, c, isOwner) {
     plus.type = "button";
     plus.setAttribute("aria-label", "Increase quantity");
     plus.textContent = "+";
-    if (c.quantity >= DECK_MAX_QTY) plus.disabled = true;
+    const atLimit = deckCopiesLeft(deck, c.snapshot?.name || c.cardId) <= 0;
+    if (atLimit) plus.disabled = true;
     plus.onclick = () => {
-      if (c.quantity >= DECK_MAX_QTY) return;
+      if (atLimit) return;
       updateDeckCardQuantity(deck.id, c.cardId, c.quantity + 1);
       paintDeckDetail(deck.id);
     };
@@ -6017,9 +6352,10 @@ function makePoolCardOption(deck, card, source) {
   const inDeck = (deck.cards || []).find(c => c.cardId === card.id);
   const btn = document.createElement("button");
   btn.type = "button";
-  if (inDeck && inDeck.quantity >= DECK_MAX_QTY) {
+  if (deckCopiesLeft(deck, card.name || card.id) <= 0) {
     btn.className = "btn ghost";
-    btn.textContent = `Max (×${DECK_MAX_QTY})`;
+    btn.textContent = inDeck ? `Max (×${inDeck.quantity})` : `Max ${DECK_MAX_QTY}`;
+    btn.title = `A deck can hold at most ${DECK_MAX_QTY} copies of ${card.name || "this card"} across all printings.`;
     btn.disabled = true;
   } else if (inDeck) {
     btn.className = "btn ghost";
@@ -6042,9 +6378,23 @@ function makePoolCardOption(deck, card, source) {
 }
 
 // ---- Router
-function route() {
+// Signed-in accounts without a city (e.g. a new Google user who clicked away
+// from the finish-signup page) are sent back there until it's filled in.
+function needsProfileCompletion() {
+  if (cloudSync.enabled && !profileStore.get()) return false; // profile still loading
+  const acc = authStore.current();
+  return !!acc && !String(acc.location || "").trim();
+}
+
+// `preserveScroll` is set for live-data refreshes, which rebuild the page in
+// place; real navigations start at the top.
+function route(opts = {}) {
   if (window.__cleanup) { window.__cleanup(); window.__cleanup = null; }
-  window.scrollTo(0, 0);
+  if (!opts.preserveScroll) {
+    window.scrollTo(0, 0);
+    pendingRefresh = false;
+    clearTimeout(refreshTimer);
+  }
   const authed = authStore.isAuthed();
   const hash = location.hash || (authed ? "#/browse" : "#/login");
   const parts = hash.replace(/^#\/?/, "").split("/");
@@ -6052,6 +6402,10 @@ function route() {
 
   if (!authed && !isPublicRoute(parts)) {
     location.hash = "#/login";
+    return;
+  }
+  if (authed && a !== "complete-signup" && a !== "delete-account" && needsProfileCompletion()) {
+    location.hash = "#/complete-signup";
     return;
   }
   if (authed && (a === "login" || a === "signup")) {
@@ -6108,7 +6462,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 // React to remote changes pushed in by cloud-sync.js — re-render the
 // current view so other devices' edits show up live. Also re-prune any
 // seed content that another device might have re-uploaded.
-window.addEventListener("cloudsync:change", () => {
+window.addEventListener("cloudsync:change", e => {
   syncThemeFromProfile();
   pruneLegacySeedContent();
   // Pulled-down data may be in the legacy tag-model shape; migrate
@@ -6116,8 +6470,61 @@ window.addEventListener("cloudsync:change", () => {
   migrateCollectionListsShape();
   refreshCounts();
   refreshAuthUI();
-  route();
+  const detail = e.detail || {};
+  // Sign-in / sign-out changes what every page shows — re-route fully.
+  if (detail.reason !== "shared-update") { route(); return; }
+  if (!currentRouteReads(detail.key)) return;
+  pendingRefresh = true;
+  flushPendingRefresh();
 });
+
+// Shared data each page displays. Updates to anything else leave the page —
+// and whatever the user is doing on it — untouched.
+const ROUTE_SHARED_KEYS = {
+  feed:   ["feed-posts", "feed-groups", "feed-events"],
+  groups: ["feed-groups", "feed-posts", "feed-events"],
+  events: ["feed-events", "feed-groups", "verified-event-templates"],
+  trades: ["trades", "trade-profiles"],
+};
+// Forms and multi-step flows are never rebuilt underneath the user.
+const NO_LIVE_REFRESH = new Set([
+  "login", "signup", "complete-signup", "profile",
+  "reset-password", "change-email", "delete-account",
+]);
+
+function currentRouteReads(key) {
+  const [a, b] = (location.hash || "").replace(/^#\/?/, "").split("/");
+  if (NO_LIVE_REFRESH.has(a)) return false;
+  if (a === "trades" && b === "new") return false; // mid-proposal
+  return (ROUTE_SHARED_KEYS[a] || []).includes(key);
+}
+
+// A live refresh waits until the user isn't mid-interaction (typing, a picked
+// file, an open card modal), then rebuilds the page at the same scroll spot.
+let pendingRefresh = false;
+let refreshTimer = null;
+function flushPendingRefresh() {
+  clearTimeout(refreshTimer);
+  if (!pendingRefresh) return;
+  if (userIsBusy()) { refreshTimer = setTimeout(flushPendingRefresh, 1500); return; }
+  pendingRefresh = false;
+  const y = window.scrollY;
+  route({ preserveScroll: true });
+  window.scrollTo(0, y);
+}
+
+function userIsBusy() {
+  const modal = document.getElementById("modal");
+  if (modal && !modal.classList.contains("hidden")) return true;
+  if (document.querySelector(".oauth-modal:not(.hidden)")) return true;
+  const active = document.activeElement;
+  if (active && view.contains(active) && active.matches("input, textarea, select, [contenteditable]")) return true;
+  for (const el of view.querySelectorAll("textarea, input")) {
+    if (el.type === "file" && el.files && el.files.length) return true;
+    if ((el.tagName === "TEXTAREA" || ["text", "url", "email", "number"].includes(el.type)) && el.value.trim()) return true;
+  }
+  return false;
+}
 
 // Remove any legacy seed posts/groups/events that earlier app versions wrote
 // to localStorage or Firestore. Idempotent — safe to call on every cloud
@@ -6125,24 +6532,22 @@ window.addEventListener("cloudsync:change", () => {
 // cloud-sync diff push is a no-op when nothing has changed.
 function pruneLegacySeedContent() {
   ["feed-seeded", "feed-seeded-community", "events-seeded"].forEach(k => localStorage.removeItem(k));
-  const seedAuthors = new Set(["Maya", "Hiro", "Lena", "Diego", "Sven", "Mira", "Jules"]);
-  const seedGroupNames = new Set(["Brooklyn TCG League", "Vintage Pulls", "Tokyo Collectors", "Berlin Trade Circle"]);
-  const seedEventTitles = new Set(["Brooklyn TCG Trade Night", "Vintage Pulls Showcase", "Akihabara Card Shop Crawl"]);
-
+  // Match seed content by its id prefixes only — real users can share a seed
+  // author's name ("Diego") or a seed group's title, and this runs on every
+  // client, so name matching deleted their content for everyone.
   const posts = postStore.list();
   const cleanPosts = posts.filter(p => {
-    if (seedAuthors.has(p.authorName)) return false;
     const id = String(p.id || "");
     return !(id.startsWith("seed-p-") || id.startsWith("community-"));
   });
   if (cleanPosts.length !== posts.length) postStore.save(cleanPosts);
 
   const groups = groupStore.list();
-  const cleanGroups = groups.filter(g => !seedGroupNames.has(g.name) && !String(g.id || "").startsWith("seed-g-"));
+  const cleanGroups = groups.filter(g => !String(g.id || "").startsWith("seed-g-"));
   if (cleanGroups.length !== groups.length) groupStore.save(cleanGroups);
 
   const events = eventStore.list();
-  const cleanEvents = events.filter(e => !seedEventTitles.has(e.title) && !String(e.id || "").startsWith("seed-e-"));
+  const cleanEvents = events.filter(e => !String(e.id || "").startsWith("seed-e-"));
   if (cleanEvents.length !== events.length) eventStore.save(cleanEvents);
 }
 
