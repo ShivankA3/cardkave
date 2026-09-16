@@ -478,6 +478,51 @@ function setActiveNav(route) {
   });
 }
 
+// ---- Mobile nav: hamburger dropdown
+// The nav + profile links live in #topbar-menu, which CSS turns into a
+// dropdown panel below 900px. Everything here is a no-op on desktop, where
+// the panel is always visible and the toggle button is hidden.
+function setNavMenu(open) {
+  const menu = document.getElementById("topbar-menu");
+  const btn = document.getElementById("nav-toggle");
+  if (!menu || !btn) return;
+  menu.classList.toggle("open", open);
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.setAttribute("aria-label", open ? "Close menu" : "Menu");
+}
+
+function closeNavMenu() { setNavMenu(false); }
+
+function initNavMenu() {
+  const menu = document.getElementById("topbar-menu");
+  const btn = document.getElementById("nav-toggle");
+  if (!menu || !btn) return;
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    setNavMenu(!menu.classList.contains("open"));
+  });
+  // Following any link in the panel should dismiss it, including a tap on the
+  // route you're already on (which fires no hashchange).
+  menu.addEventListener("click", e => {
+    if (e.target.closest("a")) closeNavMenu();
+  });
+  document.addEventListener("click", e => {
+    if (!menu.classList.contains("open")) return;
+    if (!menu.contains(e.target) && !btn.contains(e.target)) closeNavMenu();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && menu.classList.contains("open")) {
+      closeNavMenu();
+      btn.focus();
+    }
+  });
+  // Rotating to a width where the panel is inline again would otherwise leave
+  // the stale `.open` class behind.
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 900) closeNavMenu();
+  });
+}
+
 // Insert the sub-tab strip for a consolidated group at the top of the current
 // view's section. `activeKey` is the route currently being shown.
 function mountSubtabs(activeKey) {
@@ -6390,6 +6435,7 @@ function needsProfileCompletion() {
 // place; real navigations start at the top.
 function route(opts = {}) {
   if (window.__cleanup) { window.__cleanup(); window.__cleanup = null; }
+  closeNavMenu();
   if (!opts.preserveScroll) {
     window.scrollTo(0, 0);
     pendingRefresh = false;
@@ -6444,6 +6490,7 @@ function route(opts = {}) {
 window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", async () => {
   applyTheme(themeStore.get());
+  initNavMenu();
   initEmailService();
   // If cloud sync is on, wait for the first auth state to resolve so we
   // don't bounce a logged-in user to /login while Firebase loads their
