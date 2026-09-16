@@ -19,7 +19,7 @@
     }
   } catch (e) {}
 </script>
-<link rel="stylesheet" href="styles.css?v=39" />
+<link rel="stylesheet" href="styles.css?v=40" />
 </head>
 <body>
   <header class="topbar">
@@ -27,14 +27,23 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-name">CardKave</span>
     </a>
-    <nav class="nav" aria-label="Primary">
-      <a href="#/browse" data-route="browse">Browse</a>
-      <a href="#/collection" data-route="collection">Collection <span class="count" id="count-collection">0</span></a>
-      <a href="#/decks" data-route="decks">Decks <span class="count" id="count-decks">0</span></a>
-      <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
-      <a href="#/feed" data-route="community">Community</a>
-    </nav>
-    <a class="nav-profile" id="nav-profile" href="#/login" data-route="login">Sign in</a>
+    <!-- On phones the nav + profile links collapse behind the hamburger so the
+         topbar stays a single line; `display: contents` keeps the desktop
+         layout untouched. -->
+    <button class="nav-toggle" id="nav-toggle" type="button"
+            aria-label="Menu" aria-expanded="false" aria-controls="topbar-menu">
+      <span class="nav-toggle-bars" aria-hidden="true"></span>
+    </button>
+    <div class="topbar-menu" id="topbar-menu">
+      <nav class="nav" aria-label="Primary">
+        <a href="#/browse" data-route="browse">Browse</a>
+        <a href="#/collection" data-route="collection">Collection <span class="count" id="count-collection">0</span></a>
+        <a href="#/decks" data-route="decks">Decks <span class="count" id="count-decks">0</span></a>
+        <a href="#/trades" data-route="trades">Trades <span class="count" id="count-trades">0</span></a>
+        <a href="#/feed" data-route="community">Community</a>
+      </nav>
+      <a class="nav-profile" id="nav-profile" href="#/login" data-route="login">Sign in</a>
+    </div>
   </header>
 
   <main id="view" class="view" aria-live="polite"></main>

@@ -114,7 +114,7 @@ button { font: inherit; color: inherit; }
   background: var(--bg);
   border-bottom: var(--border-w) solid var(--border);
 }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -0.02em; }
+.brand { display: flex; align-items: center; flex-shrink: 0; gap: 10px; font-weight: 800; letter-spacing: -0.02em; }
 /* Pokéball brand mark — coral cap, cream base, ink band + centre dot. */
 .brand-mark {
   width: 22px; height: 22px; border-radius: 50%;
@@ -135,11 +135,12 @@ button { font: inherit; color: inherit; }
 }
 .brand-name { font-size: 18px; color: var(--fg); font-family: var(--font-display); font-weight: 800; }
 
-.nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.nav { display: flex; gap: 4px; flex-wrap: nowrap; flex-shrink: 0; }
 .nav a {
   position: relative;
   padding: 7px 12px; border-radius: 999px;
   color: var(--muted); font-size: 14px; font-weight: 600;
+  white-space: nowrap;
   border: 2px solid transparent;
   transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
 }
@@ -869,13 +870,92 @@ button { font: inherit; color: inherit; }
 }
 
 /* ---- Feed feature ---- */
-.topbar { gap: 12px; flex-wrap: wrap; }
+/* The bar is a single line at every width: above the mobile breakpoint the
+   brand and nav hold their size and a long display name truncates; below
+   it the nav collapses into the hamburger dropdown. */
+.topbar { gap: 12px; flex-wrap: nowrap; }
 .nav-profile {
   display: inline-flex; align-items: center; gap: 8px;
   font-size: 14px; color: var(--muted);
   padding: 6px 10px; border-radius: 8px;
 }
 .nav-profile:hover, .nav-profile.active { color: var(--fg); background: var(--line); }
+/* Keep an unusually long display name from wrapping the desktop bar. */
+.nav-profile { min-width: 0; flex-shrink: 1; }
+.nav-profile > span:not(.avatar) {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---- Mobile topbar: hamburger dropdown ----
+   Above the breakpoint the wrapper is transparent (`display: contents`) so the
+   nav and profile links stay direct flex children of .topbar and the desktop
+   layout is unchanged. Below it, the wrapper becomes a dropdown panel anchored
+   under the bar and the topbar collapses to brand + hamburger on one line. */
+.topbar-menu { display: contents; }
+.nav-toggle { display: none; }
+
+@media (max-width: 900px) {
+  .topbar {
+    flex-wrap: nowrap;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .nav-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    width: 40px; height: 40px; padding: 0;
+    background: var(--card);
+    border: var(--border-w) solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-xs);
+    cursor: pointer;
+  }
+  .nav-toggle-bars,
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after {
+    display: block;
+    width: 18px; height: 2.5px;
+    border-radius: 2px;
+    background: var(--fg);
+  }
+  .nav-toggle-bars { position: relative; }
+  .nav-toggle-bars::before,
+  .nav-toggle-bars::after { content: ""; position: absolute; left: 0; }
+  .nav-toggle-bars::before { top: -6px; }
+  .nav-toggle-bars::after { top: 6px; }
+
+  .topbar-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 12px; right: 12px;
+    z-index: 20;
+    flex-direction: column; align-items: stretch;
+    gap: 2px;
+    padding: 8px;
+    /* Landscape phones have very little height to spare. */
+    max-height: calc(100vh - 80px);
+    overflow-y: auto; overscroll-behavior: contain;
+    background: var(--card);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .topbar-menu.open { display: flex; }
+  .topbar-menu .nav { flex-direction: column; flex-wrap: nowrap; gap: 2px; }
+  .topbar-menu .nav a {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 14px; border-radius: 10px; font-size: 15px;
+  }
+  .topbar-menu .nav-profile {
+    justify-content: flex-start;
+    margin-top: 6px; padding: 13px 14px 11px;
+    border-top: 1px solid var(--line);
+    border-radius: 0 0 10px 10px;
+    font-size: 15px;
+  }
+}
 
 .tabs {
   display: inline-flex; gap: 2px;
